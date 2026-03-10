@@ -311,12 +311,16 @@ process_document <- function(word_path, config, rtf_paths, selections, output_pa
   session <- open_docx(word_path)
   on.exit(unlink(session$tmp_dir, recursive = TRUE), add = TRUE)
 
+  # row index (as character) -> "ok" | error message string
+  status <- vector("list", nrow(config))
+  names(status) <- as.character(seq_len(nrow(config)))
+
   for (i in seq_len(nrow(config))) {
     bm_name  <- config$Bookmark[i]
     tbl_name <- config$Table[i]
 
     if (!tbl_name %in% names(rtf_paths)) {
-      warning(sprintf("RTF file for '%s' not found, skipping.", tbl_name))
+      status[[i]] <- "RTF file not found in folder"
       next
     }
 
@@ -325,27 +329,32 @@ process_document <- function(word_path, config, rtf_paths, selections, output_pa
     if (is_image_rtf(rtf_path)) {
       img <- extract_png(rtf_path)
       if (is.null(img)) {
-        warning(sprintf("Could not extract PNG from '%s', skipping.", tbl_name))
+        status[[i]] <- "Could not extract PNG from RTF"
         next
       }
-      inject_image(session, bm_name, img$png_bytes, img$width_twips, img$height_twips)
+      tryCatch(
+        inject_image(session, bm_name, img$png_bytes, img$width_twips, img$height_twips),
+        error = function(e) status[[i]] <<- conditionMessage(e)
+      )
 
     } else {
       sel <- selections[[as.character(i)]]
-      # Convert text width from EMU to twips (1 twip = 635 EMU) for scaling
       tw_twips <- round(session$text_width_emu / TWIPS_TO_EMU)
-      xml_str <- get_table_xml(
-        rtf_path,
-        excluded_cols        = sel$excluded_cols,
-        excluded_rows        = sel$excluded_rows,
-        excluded_header_rows = sel$excluded_header_rows,
-        parameters           = sel$parameters,
-        timelines            = sel$timelines,
-        text_width_twips     = tw_twips
-      )
-      inject_table(session, bm_name, xml_str)
+      tryCatch({
+        xml_str <- get_table_xml(
+          rtf_path,
+          excluded_cols        = sel$excluded_cols,
+          excluded_rows        = sel$excluded_rows,
+          excluded_header_rows = sel$excluded_header_rows,
+          parameters           = sel$parameters,
+          timelines            = sel$timelines,
+          text_width_twips     = tw_twips
+        )
+        inject_table(session, bm_name, xml_str)
+      }, error = function(e) status[[i]] <<- conditionMessage(e))
     }
   }
 
   close_docx(session, output_path)
+  invisible(status)
 }

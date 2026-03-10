@@ -167,7 +167,8 @@ server <- function(input, output, session) {
 
   # selections keyed by row index (character):
   #   list(excluded_cols, excluded_rows, excluded_header_rows, parameters, timelines)
-  table_selections <- reactiveVal(list())
+  table_selections    <- reactiveVal(list())
+  last_gen_status     <- reactiveVal(NULL)
 
   #
   # WORD FILE
@@ -861,23 +862,36 @@ server <- function(input, output, session) {
       if (length(valid_rows) == 0L) {
         lines <- c(lines, "(no table mappings defined)")
       } else {
-        for (i in valid_rows) {
+        gen_status <- last_gen_status()
+
+      fmt_vec <- function(x, none = "(all)") {
+        if (is.null(x) || length(x) == 0L) none else paste(x, collapse = "; ")
+      }
+
+      for (i in valid_rows) {
           bm_val  <- trimws(df$Bookmark[i])
           tbl_val <- trimws(df$Table[i])
           sel     <- sels[[as.character(i)]] %||% list()
+          err     <- gen_status[[as.character(i)]]
 
-          fmt_vec <- function(x, none = "(all)") {
-            if (is.null(x) || length(x) == 0L) none else paste(x, collapse = "; ")
+          if (!is.null(err)) {
+            lines <- c(lines,
+              paste0("Row       : ", i),
+              paste0("Bookmark  : ", bm_val),
+              paste0("Table     : ", tbl_val, ".rtf"),
+              paste0("Status    : ERROR - ", err),
+              ""
+            )
+          } else {
+            lines <- c(lines,
+              paste0("Row       : ", i),
+              paste0("Bookmark  : ", bm_val),
+              paste0("Table     : ", tbl_val, ".rtf"),
+              paste0("Parameters: ", fmt_vec(sel$parameters)),
+              paste0("Timelines : ", fmt_vec(sel$timelines)),
+              ""
+            )
           }
-
-          lines <- c(lines,
-            paste0("Row       : ", i),
-            paste0("Bookmark  : ", bm_val),
-            paste0("Table     : ", tbl_val, ".rtf"),
-            paste0("Parameters: ", fmt_vec(sel$parameters)),
-            paste0("Timelines : ", fmt_vec(sel$timelines)),
-            ""
-          )
         }
       }
 
@@ -930,7 +944,7 @@ server <- function(input, output, session) {
         showNotification("No table mappings defined", type = "error"); return()
       }
 
-      tryCatch(
+      status <- tryCatch(
         process_document(
           word_path   = input$word_file$datapath,
           config      = config,
@@ -940,8 +954,10 @@ server <- function(input, output, session) {
         ),
         error = function(e) {
           showNotification(paste("Error generating document:", conditionMessage(e)), type = "error")
+          NULL
         }
       )
+      last_gen_status(status)
     }
   )
 }
