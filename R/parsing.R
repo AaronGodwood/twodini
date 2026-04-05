@@ -2,6 +2,13 @@
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
+# Check if C routines are available (package installed with compiled code)
+.has_c <- tryCatch(is.function(.Call), error = function(e) FALSE)
+.use_c <- .has_c && tryCatch({
+  getNativeSymbolInfo("C_find_matching_brace", PACKAGE = "houdini")
+  TRUE
+}, error = function(e) FALSE)
+
 # 1. LOW-LEVEL RTF HELPERS
 
 # Read raw bytes and convert to UTF-8 string, handling CP1252/Latin-1
@@ -20,7 +27,7 @@ rtf_read_raw <- function(path) {
 # Resolve RTF escape sequences in a text string:
 #   \'xx  -> the character for hex xx (in latin1, then to UTF-8)
 #   \uN   -> Unicode code point N (followed by a fallback char we skip)
-rtf_unescape <- function(text) {
+rtf_unescape_r <- function(text) {
   # Handle \uN escapes: find all, replace in reverse order to preserve positions
   m <- gregexpr("\\\\u(-?[0-9]+)\\??.", text, perl = TRUE)[[1]]
   if (m[1L] != -1L) {
@@ -53,6 +60,10 @@ rtf_unescape <- function(text) {
   text
 }
 
+rtf_unescape <- function(text) {
+  if (.use_c) .Call(C_rtf_unescape, text) else rtf_unescape_r(text)
+}
+
 # Fast hex string to raw vector conversion.
 # Processes in chunks of 4000 bytes (8000 hex chars) to limit intermediate
 # string allocation compared to one-pair-at-a-time substring calls.
@@ -76,7 +87,7 @@ hex_to_raw <- function(hex) {
 
 # Find the position of the closing brace matching the opening brace at `start`.
 # Converts to raw bytes for O(1) indexing instead of per-character substr calls.
-find_matching_brace <- function(text, start) {
+find_matching_brace_r <- function(text, start) {
   bytes <- charToRaw(text)
   n <- length(bytes)
   open  <- charToRaw("{")
@@ -93,6 +104,11 @@ find_matching_brace <- function(text, start) {
     pos <- pos + 1L
   }
   NA_integer_
+}
+
+find_matching_brace <- function(text, start) {
+  if (.use_c) .Call(C_find_matching_brace, text, as.integer(start))
+  else find_matching_brace_r(text, start)
 }
 
 # Remove all groups tagged with any of the given tags in a single pass.
@@ -327,7 +343,7 @@ parse_rtf_table <- function(section_text) {
 }
 
 # Strip RTF markup from a cell's raw text, returning clean plain text
-rtf_cell_to_text <- function(raw) {
+rtf_cell_to_text_r <- function(raw) {
   # Remove nested groups (e.g. field instructions, pictures)
   text <- raw
 
@@ -357,6 +373,10 @@ rtf_cell_to_text <- function(raw) {
   text <- rtf_unescape(text)
 
   trimws(text)
+}
+
+rtf_cell_to_text <- function(raw) {
+  if (.use_c) .Call(C_rtf_cell_to_text, raw) else rtf_cell_to_text_r(raw)
 }
 
 # 5. PAGE PARSING
