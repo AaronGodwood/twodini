@@ -60,7 +60,7 @@ xml_header_row <- function(row, is_last_header) {
       "<w:pPr><w:jc w:val=\"%s\"/><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>",
       align
     )
-    run  <- sprintf("<w:r>%s<w:t>%s</w:t></w:r>", run_pr, xml_escape(cell$text))
+    run  <- sprintf("<w:r>%s<w:t xml:space=\"preserve\">%s</w:t></w:r>", run_pr, xml_escape(cell$text))
     para <- sprintf("<w:p>%s%s</w:p>", para_pr, run)
 
     sprintf("<w:tc>%s%s</w:tc>", tc_pr, para)
@@ -86,7 +86,7 @@ xml_data_row <- function(row, is_last_data) {
       "<w:pPr><w:jc w:val=\"%s\"/><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>",
       align
     )
-    run     <- sprintf("<w:r>%s<w:t>%s</w:t></w:r>", run_pr, xml_escape(cell$text))
+    run     <- sprintf("<w:r>%s<w:t xml:space=\"preserve\">%s</w:t></w:r>", run_pr, xml_escape(cell$text))
     para    <- sprintf("<w:p>%s%s</w:p>", para_pr, run)
 
     sprintf("<w:tc>%s%s</w:tc>", tc_pr, para)
@@ -112,28 +112,8 @@ build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
     n_cols_total <- length(header_rows[[1]]$cells)
   }
 
-  # Apply column filter - NULL or empty both mean "all columns"
-  if (is.null(cols) || length(cols) == 0L) {
-    cols <- seq_len(n_cols_total)
-  } else {
-    cols_int <- suppressWarnings(as.integer(cols))
-    if (anyNA(cols_int)) {
-      # cols contains names - resolve to indices via first header row
-      ref_names <- if (length(header_rows) > 0L) {
-        vapply(header_rows[[1]]$cells, function(c) c$text, character(1))
-      } else character()
-      cols_int <- match(as.character(cols), ref_names)
-      cols_int <- cols_int[!is.na(cols_int)]
-    }
-    cols <- cols_int[cols_int >= 1L & cols_int <= n_cols_total]
-    if (length(cols) == 0L) cols <- seq_len(n_cols_total)
-  }
-
-  # Apply row filter
-  n_data <- length(data_rows)
-  rs <- if (is.null(row_start)) 1L else max(1L, as.integer(row_start))
-  re <- if (is.null(row_end))   n_data else min(n_data, as.integer(row_end))
-  data_rows <- if (rs <= re) data_rows[seq(rs, re)] else list()
+  cols      <- resolve_cols(cols, n_cols_total, header_rows)
+  data_rows <- slice_rows(data_rows, row_start, row_end)
 
   # Filter cells to selected columns
   filter_cells <- function(row) {
@@ -205,22 +185,14 @@ get_table_xml <- function(path,
                            excluded_header_rows = NULL,
                            parameters           = NULL,
                            timelines            = NULL,
-                           text_width_twips     = NULL) {
-  pages    <- parse_rtf(path)
-  pages    <- filter_pages(pages, parameters)
-  pages    <- filter_timelines(pages, timelines)
-  combined <- combine_pages(pages)
-
-  n_cols <- length(combined$col_widths_twips)
-  n_data <- length(combined$data_rows)
-  n_hdr  <- length(combined$header_rows)
-
-  included_cols <- setdiff(seq_len(n_cols), excluded_cols        %||% integer())
-  included_rows <- setdiff(seq_len(n_data), excluded_rows        %||% integer())
-  included_hdrs <- setdiff(seq_len(n_hdr),  excluded_header_rows %||% integer())
-
-  combined$data_rows   <- combined$data_rows[included_rows]
-  combined$header_rows <- combined$header_rows[included_hdrs]
-
-  build_xml(combined, cols = included_cols, text_width_twips = text_width_twips)
+                           text_width_twips     = NULL,
+                           pages                = NULL) {
+  prep <- prepare_table(
+    pages = pages, path = path,
+    excluded_cols = excluded_cols, excluded_rows = excluded_rows,
+    excluded_header_rows = excluded_header_rows,
+    parameters = parameters, timelines = timelines
+  )
+  build_xml(prep$combined, cols = prep$included_cols,
+            text_width_twips = text_width_twips)
 }

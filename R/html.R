@@ -61,27 +61,8 @@ build_html <- function(combined, cols = NULL, row_start = NULL, row_end = NULL) 
     n_cols_total <- length(header_rows[[1]]$cells)
   }
 
-  # Apply column filter - NULL or empty both mean "all columns"
-  if (is.null(cols) || length(cols) == 0L) {
-    cols <- seq_len(n_cols_total)
-  } else {
-    cols_int <- suppressWarnings(as.integer(cols))
-    if (anyNA(cols_int)) {
-      ref_names <- if (length(header_rows) > 0L) {
-        vapply(header_rows[[1]]$cells, function(c) c$text, character(1))
-      } else character()
-      cols_int <- match(as.character(cols), ref_names)
-      cols_int <- cols_int[!is.na(cols_int)]
-    }
-    cols <- cols_int[cols_int >= 1L & cols_int <= n_cols_total]
-    if (length(cols) == 0L) cols <- seq_len(n_cols_total)
-  }
-
-  # Apply row filter
-  n_data <- length(data_rows)
-  rs <- if (is.null(row_start)) 1L else max(1L, as.integer(row_start))
-  re <- if (is.null(row_end))   n_data else min(n_data, as.integer(row_end))
-  data_rows <- if (rs <= re) data_rows[seq(rs, re)] else list()
+  cols      <- resolve_cols(cols, n_cols_total, header_rows)
+  data_rows <- slice_rows(data_rows, row_start, row_end)
 
   # Helper: filter cells in a row to selected cols
   filter_cells <- function(row) {
@@ -282,8 +263,10 @@ get_table_html_selection <- function(path,
                                      excluded_rows        = NULL,
                                      excluded_header_rows = NULL,
                                      parameters           = NULL,
-                                     timelines            = NULL) {
-  combined <- parse_rtf(path) |>
+                                     timelines            = NULL,
+                                     pages                = NULL) {
+  if (is.null(pages)) pages <- parse_rtf(path)
+  combined <- pages |>
     filter_pages(parameters) |>
     filter_timelines(timelines) |>
     combine_pages()
@@ -309,32 +292,23 @@ get_table_html_output <- function(path,
                                   excluded_rows        = NULL,
                                   excluded_header_rows = NULL,
                                   parameters           = NULL,
-                                  timelines            = NULL) {
-  combined <- parse_rtf(path) |>
-    filter_pages(parameters) |>
-    filter_timelines(timelines) |>
-    combine_pages()
-
-  n_cols <- length(combined$col_widths_twips)
-  n_data <- length(combined$data_rows)
-  n_hdr  <- length(combined$header_rows)
-
-  inc_cols <- setdiff(seq_len(n_cols), excluded_cols        %||% integer())
-  inc_rows <- setdiff(seq_len(n_data), excluded_rows        %||% integer())
-  inc_hdrs <- setdiff(seq_len(n_hdr),  excluded_header_rows %||% integer())
-
-  combined$data_rows   <- combined$data_rows[inc_rows]
-  combined$header_rows <- combined$header_rows[inc_hdrs]
-
-  build_html(combined, cols = inc_cols)
+                                  timelines            = NULL,
+                                  pages                = NULL) {
+  prep <- prepare_table(
+    pages = pages, path = path,
+    excluded_cols = excluded_cols, excluded_rows = excluded_rows,
+    excluded_header_rows = excluded_header_rows,
+    parameters = parameters, timelines = timelines
+  )
+  build_html(prep$combined, cols = prep$included_cols)
 }
 
 #' Generate full HTML preview for an RTF file
 #'
 #' @param path Path to the .rtf file
 #' @return HTML string
-get_table_html <- function(path) {
-  pages    <- parse_rtf(path)
+get_table_html <- function(path, pages = NULL) {
+  if (is.null(pages)) pages <- parse_rtf(path)
   combined <- combine_pages(pages)
   build_html(combined)
 }
