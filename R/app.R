@@ -56,6 +56,34 @@ ui <- fluidPage(
       .sel-pane th[data-col] { cursor: pointer; }
       .sel-pane tr[data-row] { cursor: pointer; }
       .preview-centred table { margin-left: auto; margin-right: auto; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .btn-spinner {
+        display: inline-block;
+        width: 14px; height: 14px;
+        border: 2px solid rgba(255,255,255,0.4);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: spin 0.6s linear infinite;
+        vertical-align: middle;
+        margin-right: 6px;
+      }
+    ")),
+    tags$script(HTML("
+      $(function() {
+        var btn = document.getElementById('download_result');
+        if (!btn) return;
+        var origHTML = btn.innerHTML;
+        btn.addEventListener('click', function() {
+          btn.innerHTML = '<span class=\"btn-spinner\"></span>Generating...';
+          btn.style.pointerEvents = 'none';
+          btn.style.opacity = '0.75';
+        });
+        $(document).on('shiny:filedownload', function() {
+          btn.innerHTML = origHTML;
+          btn.style.pointerEvents = '';
+          btn.style.opacity = '';
+        });
+      });
     "))
   ),
 
