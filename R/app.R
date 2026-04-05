@@ -165,6 +165,21 @@ server <- function(input, output, session) {
   # table_info cache: table_name -> get_table_info() result
   table_info_cache <- reactiveVal(list())
 
+  # parse_rtf cache: table_name -> parse_rtf() result (list of pages)
+  parse_cache <- reactiveVal(list())
+
+  # Get cached parsed pages for a table, parsing on first access
+  get_cached_pages <- function(tbl_name) {
+    cache <- parse_cache()
+    if (!is.null(cache[[tbl_name]])) return(cache[[tbl_name]])
+    paths <- rtf_paths()
+    if (!tbl_name %in% names(paths)) return(NULL)
+    pages <- parse_rtf(paths[[tbl_name]])
+    cache[[tbl_name]] <- pages
+    parse_cache(cache)
+    pages
+  }
+
   # selections keyed by row index (character):
   #   list(excluded_cols, excluded_rows, excluded_header_rows, parameters, timelines)
   table_selections    <- reactiveVal(list())
@@ -223,6 +238,7 @@ server <- function(input, output, session) {
     available_tables(tbl_names)
     rtf_paths(setNames(as.list(full_paths), tbl_names))
     table_info_cache(list())
+    parse_cache(list())
     showNotification(paste("Found", length(rtf_files), "RTF files"), type = "message")
   })
 
@@ -509,13 +525,29 @@ server <- function(input, output, session) {
                                       is_image = TRUE)
             table_info_cache(cache)
           } else {
-            info <- tryCatch(
-              get_table_info(paths[[tbl_name]]),
-              error = function(e) {
-                showNotification(paste("Error reading RTF:", conditionMessage(e)), type = "error")
-                NULL
-              }
-            )
+            info <- tryCatch({
+              pages <- get_cached_pages(tbl_name)
+              combined <- combine_pages(pages)
+              ref_row <- if (length(combined$header_rows) > 0L) {
+                combined$header_rows[[1]]
+              } else if (length(combined$data_rows) > 0L) {
+                combined$data_rows[[1]]
+              } else NULL
+              n_cols <- if (!is.null(ref_row)) length(ref_row$cells) else 0L
+              col_names <- if (!is.null(ref_row)) {
+                vapply(ref_row$cells, function(cell) cell$text, character(1))
+              } else character()
+              list(
+                n_cols     = n_cols,
+                n_rows     = length(combined$data_rows),
+                col_names  = col_names,
+                parameters = get_parameters(pages),
+                timelines  = get_timelines(pages)
+              )
+            }, error = function(e) {
+              showNotification(paste("Error reading RTF:", conditionMessage(e)), type = "error")
+              NULL
+            })
             if (!is.null(info)) {
               cache[[tbl_name]] <- info
               table_info_cache(cache)
@@ -749,6 +781,8 @@ server <- function(input, output, session) {
       paste0("[", paste(x, collapse = ","), "]")
     }
 
+    cached_pages <- get_cached_pages(tbl_name)
+
     html_content <- tryCatch(
       get_table_html_selection(
         paths[[tbl_name]],
@@ -756,7 +790,8 @@ server <- function(input, output, session) {
         excluded_rows        = er,
         excluded_header_rows = eh,
         parameters           = sel$parameters,
-        timelines            = sel$timelines
+        timelines            = sel$timelines,
+        pages                = cached_pages
       ),
       error = function(e) sprintf(
         "<p style='color:red'>Selection error: %s</p>",
@@ -817,6 +852,8 @@ server <- function(input, output, session) {
     row  <- current_row_index()
     sel  <- table_selections()[[as.character(row)]] %||% list()
 
+    cached_pages <- get_cached_pages(tbl_name)
+
     html_content <- tryCatch(
       get_table_html_output(
         paths[[tbl_name]],
@@ -824,7 +861,8 @@ server <- function(input, output, session) {
         excluded_rows        = excl$rows,
         excluded_header_rows = excl$hdrs,
         parameters           = sel$parameters,
-        timelines            = sel$timelines
+        timelines            = sel$timelines,
+        pages                = cached_pages
       ),
       error = function(e) sprintf(
         "<p style='color:red'>Output error: %s</p>",
