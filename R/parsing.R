@@ -1,5 +1,7 @@
 # parsing.R - RTF -> structured R data
 
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
 # 1. LOW-LEVEL RTF HELPERS
 
 # Read raw bytes and convert to UTF-8 string, handling CP1252/Latin-1
@@ -19,28 +21,86 @@ rtf_read_raw <- function(path) {
 #   \'xx  -> the character for hex xx (in latin1, then to UTF-8)
 #   \uN   -> Unicode code point N (followed by a fallback char we skip)
 rtf_unescape <- function(text) {
-  repeat {
-    m <- regexpr("\\\\u(-?[0-9]+)\\??.", text, perl = TRUE)
-    if (m == -1L) break
-    n <- as.integer(sub("\\\\u(-?[0-9]+).*", "\\1",
-                        substr(text, m, m + attr(m, "match.length") - 1L)))
-    if (n < 0L) n <- n + 65536L
-    text <- paste0(substr(text, 1L, m - 1L),
-                   intToUtf8(n),
-                   substr(text, m + attr(m, "match.length"), nchar(text)))
+  # Handle \uN escapes: find all, replace in reverse order to preserve positions
+  m <- gregexpr("\\\\u(-?[0-9]+)\\??.", text, perl = TRUE)[[1]]
+  if (m[1L] != -1L) {
+    lens <- attr(m, "match.length")
+    for (i in rev(seq_along(m))) {
+      matched <- substr(text, m[i], m[i] + lens[i] - 1L)
+      n <- suppressWarnings(as.integer(sub("\\\\u(-?[0-9]+).*", "\\1", matched)))
+      if (is.na(n)) next
+      if (n < 0L) n <- n + 65536L
+      text <- paste0(substr(text, 1L, m[i] - 1L),
+                     intToUtf8(n),
+                     substr(text, m[i] + lens[i], nchar(text)))
+    }
   }
 
-  repeat {
-    m <- regexpr("\\\\'([0-9a-fA-F]{2})", text, perl = TRUE)
-    if (m == -1L) break
-    hex <- substr(text, m + 2L, m + 3L)
-    ch  <- rawToChar(as.raw(strtoi(hex, 16L)))
-    ch  <- iconv(ch, from = "latin1", to = "UTF-8", sub = "?")
-    text <- paste0(substr(text, 1L, m - 1L),
-                   ch,
-                   substr(text, m + 4L, nchar(text)))
+  # Handle \'xx hex escapes the same way
+  m <- gregexpr("\\\\'([0-9a-fA-F]{2})", text, perl = TRUE)[[1]]
+  if (m[1L] != -1L) {
+    lens <- attr(m, "match.length")
+    for (i in rev(seq_along(m))) {
+      hex <- substr(text, m[i] + 2L, m[i] + 3L)
+      ch  <- rawToChar(as.raw(strtoi(hex, 16L)))
+      ch  <- iconv(ch, from = "latin1", to = "UTF-8", sub = "?")
+      text <- paste0(substr(text, 1L, m[i] - 1L),
+                     ch,
+                     substr(text, m[i] + lens[i], nchar(text)))
+    }
   }
 
+  text
+}
+
+# Fast hex string to raw vector conversion.
+# Processes in chunks of 4000 bytes (8000 hex chars) to limit intermediate
+# string allocation compared to one-pair-at-a-time substring calls.
+hex_to_raw <- function(hex) {
+  n <- nchar(hex) %/% 2L
+  chunk <- 4000L
+  parts <- vector("list", ceiling(n / chunk))
+  pi <- 1L
+  pos <- 1L
+  while (pos <= n * 2L) {
+    end <- min(pos + chunk * 2L - 1L, n * 2L)
+    piece <- substr(hex, pos, end)
+    nb <- nchar(piece) %/% 2L
+    starts <- seq(1L, by = 2L, length.out = nb)
+    parts[[pi]] <- as.raw(strtoi(substring(piece, starts, starts + 1L), 16L))
+    pi <- pi + 1L
+    pos <- end + 1L
+  }
+  unlist(parts)
+}
+
+# Find the position of the closing brace matching the opening brace at `start`.
+# Converts to raw bytes for O(1) indexing instead of per-character substr calls.
+find_matching_brace <- function(text, start) {
+  bytes <- charToRaw(text)
+  n <- length(bytes)
+  open  <- charToRaw("{")
+  close <- charToRaw("}")
+  depth <- 0L
+  pos <- start
+  while (pos <= n) {
+    b <- bytes[pos]
+    if (b == open) depth <- depth + 1L
+    else if (b == close) {
+      depth <- depth - 1L
+      if (depth == 0L) return(pos)
+    }
+    pos <- pos + 1L
+  }
+  NA_integer_
+}
+
+# Remove all groups tagged with any of the given tags in a single pass.
+# Avoids repeated full-text scans when multiple tags need stripping.
+remove_groups <- function(text, tags) {
+  for (tag in tags) {
+    text <- remove_group(text, tag)
+  }
   text
 }
 
@@ -64,32 +124,18 @@ rtf_split_pages <- function(text) {
 # e.g. tag = "\\header" finds {\\header ...}
 # Returns the inner text (without the outer braces) or NA if not found.
 extract_group <- function(text, tag) {
-  # Locate the tag
   m <- regexpr(paste0("\\", tag, "(?![a-zA-Z])"), text, perl = TRUE)
   if (m == -1L) return(NA_character_)
 
   start <- m[1]
-  # Walk back to find the opening brace for this group
-  # In RTF the pattern is always {<tag> ...} so the brace is just before tag
-  # but sometimes there's no space: {\header
   brace_pos <- NA_integer_
   for (i in seq(start - 1L, max(1L, start - 5L), by = -1L)) {
     if (substr(text, i, i) == "{") { brace_pos <- i; break }
   }
   if (is.na(brace_pos)) return(NA_character_)
 
-  # Walk forward counting braces until we close the group
-  depth <- 0L
-  chars <- strsplit(substr(text, brace_pos, nchar(text)), "")[[1]]
-  end_pos <- brace_pos
-  for (i in seq_along(chars)) {
-    ch <- chars[i]
-    if (ch == "{")  depth <- depth + 1L
-    if (ch == "}") {
-      depth <- depth - 1L
-      if (depth == 0L) { end_pos <- brace_pos + i - 1L; break }
-    }
-  }
+  end_pos <- find_matching_brace(text, brace_pos)
+  if (is.na(end_pos)) return(NA_character_)
 
   substr(text, brace_pos + 1L, end_pos - 1L)
 }
@@ -107,17 +153,8 @@ remove_group <- function(text, tag) {
     }
     if (is.na(brace_pos)) break
 
-    depth <- 0L
-    chars <- strsplit(substr(text, brace_pos, nchar(text)), "")[[1]]
-    end_pos <- brace_pos
-    for (i in seq_along(chars)) {
-      ch <- chars[i]
-      if (ch == "{")  depth <- depth + 1L
-      if (ch == "}") {
-        depth <- depth - 1L
-        if (depth == 0L) { end_pos <- brace_pos + i - 1L; break }
-      }
-    }
+    end_pos <- find_matching_brace(text, brace_pos)
+    if (is.na(end_pos)) break
 
     text <- paste0(substr(text, 1L, brace_pos - 1L),
                    substr(text, end_pos + 1L, nchar(text)))
@@ -329,15 +366,10 @@ parse_page <- function(page_text) {
   header_text <- extract_group(page_text, "\\header")
   footer_text <- extract_group(page_text, "\\footer")  # not used currently
 
-  body_text <- page_text |>
-    remove_group("\\header")  |>
-    remove_group("\\footer")  |>
-    remove_group("\\headerf") |>
-    remove_group("\\footerf") |>
-    remove_group("\\headerl") |>
-    remove_group("\\headerr") |>
-    remove_group("\\footerl") |>
-    remove_group("\\footerr")
+  body_text <- remove_groups(page_text, c(
+    "\\header", "\\footer", "\\headerf", "\\footerf",
+    "\\headerl", "\\headerr", "\\footerl", "\\footerr"
+  ))
 
   # Parse header table rows
   header_rows <- if (!is.na(header_text)) parse_rtf_table(header_text) else list()
@@ -413,18 +445,19 @@ filter_pages <- function(pages, parameters) {
 #' @param pages Output of parse_rtf()
 #' @return Character vector of unique timeline labels
 get_timelines <- function(pages) {
-  labels <- character()
-  for (page in pages) {
-    for (row in page$data_rows) {
+  labels <- vector("list", length(pages))
+  for (pi in seq_along(pages)) {
+    page_labels <- character()
+    for (row in pages[[pi]]$data_rows) {
       if (length(row$cells) == 0L) next
       col1 <- trimws(row$cells[[1]]$text)
       if (nchar(col1) == 0L) next
-      # Check all other cells are empty
       rest_empty <- all(vapply(row$cells[-1], function(cell) nchar(trimws(cell$text)) == 0L, logical(1)))
-      if (rest_empty) labels <- c(labels, col1)
+      if (rest_empty) page_labels <- c(page_labels, col1)
     }
+    labels[[pi]] <- page_labels
   }
-  unique(labels)
+  unique(unlist(labels, use.names = FALSE))
 }
 
 #' Get all unique parameter values across pages (excluding NA)
@@ -539,7 +572,79 @@ get_table_info <- function(path) {
   )
 }
 
-# 10. IMAGE EXTRACTION
+# 10. SHARED FILTER HELPERS (used by html.R and xml.R)
+
+#' Resolve column specification to integer indices
+#'
+#' Handles NULL (all), integer vector, or character names matched against headers.
+#' @param cols Column spec (NULL, integer vector, or character names)
+#' @param n_cols_total Total number of columns
+#' @param header_rows Header rows (for name matching)
+#' @return Integer vector of valid 1-based column indices
+resolve_cols <- function(cols, n_cols_total, header_rows) {
+  if (is.null(cols) || length(cols) == 0L) return(seq_len(n_cols_total))
+
+  cols_int <- suppressWarnings(as.integer(cols))
+  if (anyNA(cols_int)) {
+    ref_names <- if (length(header_rows) > 0L) {
+      vapply(header_rows[[1]]$cells, function(c) c$text, character(1))
+    } else character()
+    cols_int <- match(as.character(cols), ref_names)
+    cols_int <- cols_int[!is.na(cols_int)]
+  }
+  cols_int <- cols_int[cols_int >= 1L & cols_int <= n_cols_total]
+  if (length(cols_int) == 0L) seq_len(n_cols_total) else cols_int
+}
+
+#' Slice data rows by start/end range
+#'
+#' @param data_rows List of row objects
+#' @param row_start 1-based start (NULL = 1)
+#' @param row_end 1-based end (NULL = last)
+#' @return Sliced list of row objects
+slice_rows <- function(data_rows, row_start = NULL, row_end = NULL) {
+  n <- length(data_rows)
+  if (n == 0L) return(list())
+  rs <- if (is.null(row_start)) 1L else max(1L, as.integer(row_start))
+  re <- if (is.null(row_end))   n   else min(n, as.integer(row_end))
+  if (rs <= re) data_rows[seq(rs, re)] else list()
+}
+
+#' Prepare a combined table with filtering and exclusions applied
+#'
+#' Common pipeline used by html.R and xml.R public functions.
+#' @param pages Pre-parsed pages (from parse_rtf) or NULL
+#' @param path RTF file path (used only if pages is NULL)
+#' @param excluded_cols Integer vector of column indices to exclude
+#' @param excluded_rows Integer vector of data row indices to exclude
+#' @param excluded_header_rows Integer vector of header row indices to exclude
+#' @param parameters Parameter filter
+#' @param timelines Timeline filter
+#' @return list(combined, included_cols) where combined has rows filtered
+prepare_table <- function(pages = NULL, path = NULL,
+                          excluded_cols = NULL, excluded_rows = NULL,
+                          excluded_header_rows = NULL,
+                          parameters = NULL, timelines = NULL) {
+  if (is.null(pages)) pages <- parse_rtf(path)
+  pages    <- filter_pages(pages, parameters)
+  pages    <- filter_timelines(pages, timelines)
+  combined <- combine_pages(pages)
+
+  n_cols <- length(combined$col_widths_twips)
+  n_data <- length(combined$data_rows)
+  n_hdr  <- length(combined$header_rows)
+
+  inc_cols <- setdiff(seq_len(n_cols), excluded_cols        %||% integer())
+  inc_rows <- setdiff(seq_len(n_data), excluded_rows        %||% integer())
+  inc_hdrs <- setdiff(seq_len(n_hdr),  excluded_header_rows %||% integer())
+
+  combined$data_rows   <- combined$data_rows[inc_rows]
+  combined$header_rows <- combined$header_rows[inc_hdrs]
+
+  list(combined = combined, included_cols = inc_cols)
+}
+
+# 11. IMAGE EXTRACTION
 
 #' Check whether an RTF file contains an embedded PNG image
 #'
@@ -575,28 +680,7 @@ extract_png <- function(path) {
   }
   if (is.na(brace_pos)) return(NULL)
 
-  # Find the closing brace of the \pict group.
-  # The hex data in a \pict group contains no braces, so we only need to count
-  # braces in the short header region (control words before the hex blob).
-  # Scan forward in small chunks until depth returns to 0.
-  chunk_size <- 4096L
-  depth      <- 0L
-  end_pos    <- NA_integer_
-  pos        <- brace_pos
-  text_len   <- nchar(text)
-  while (pos <= text_len) {
-    chunk_end <- min(pos + chunk_size - 1L, text_len)
-    chars     <- strsplit(substr(text, pos, chunk_end), "")[[1]]
-    for (i in seq_along(chars)) {
-      if (chars[i] == "{") depth <- depth + 1L
-      if (chars[i] == "}") {
-        depth <- depth - 1L
-        if (depth == 0L) { end_pos <- pos + i - 1L; break }
-      }
-    }
-    if (!is.na(end_pos)) break
-    pos <- pos + chunk_size
-  }
+  end_pos <- find_matching_brace(text, brace_pos)
   if (is.na(end_pos)) return(NULL)
 
   pict_text <- substr(text, brace_pos, end_pos)
@@ -624,14 +708,10 @@ extract_png <- function(path) {
   if (nchar(hex_clean) == 0L) return(NULL)
   hex_match <- hex_clean  # reuse variable name for code below
 
-  # Strip whitespace from hex string and decode to raw bytes
+  # Decode hex string to raw bytes in chunks for speed
   hex_clean <- gsub("\\s", "", hex_match, perl = TRUE)
   if (nchar(hex_clean) %% 2L != 0L) return(NULL)
-
-  n_bytes   <- nchar(hex_clean) %/% 2L
-  byte_strs <- substring(hex_clean, seq(1L, by = 2L, length.out = n_bytes),
-                                     seq(2L, by = 2L, length.out = n_bytes))
-  png_bytes <- as.raw(strtoi(byte_strs, 16L))
+  png_bytes <- hex_to_raw(hex_clean)
 
   list(
     png_bytes    = png_bytes,
