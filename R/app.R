@@ -57,6 +57,8 @@ ui <- fluidPage(
       .sel-pane tr[data-row] { cursor: pointer; }
       .preview-centred table { margin-left: auto; margin-right: auto; }
       @keyframes spin { to { transform: rotate(360deg); } }
+      #rtf_folder_manual { margin-top: 6px; font-size: 0.82em; }
+      #rtf_folder_manual .form-control { font-size: 0.82em; }
       .btn-spinner {
         display: inline-block;
         width: 14px; height: 14px;
@@ -100,8 +102,9 @@ ui <- fluidPage(
              uiOutput("bookmark_status"),
 
              h4("2. RTF Source", class = "section-header"),
-             actionButton("pick_folder", "Choose RTF Folder...", class = "btn-primary"),
-             uiOutput("rtf_folder_display"),
+             uiOutput("folder_picker_btn"),
+             textInput("rtf_folder_manual", NULL,
+                       placeholder = "Paste folder path and press Enter\u2026"),
              uiOutput("rtf_status"),
 
              h4("3. Generate", class = "section-header"),
@@ -245,20 +248,18 @@ server <- function(input, output, session) {
 
   # RTF FOLDER
 
-
-  observeEvent(input$pick_folder, {
-    folder <- tryCatch(
-      rstudioapi::selectDirectory(caption = "Select RTF folder"),
-      error = function(e) NULL
-    )
-    if (is.null(folder) || !nzchar(folder)) return()
-
+  # Shared helper: load RTF files from a validated folder path
+  load_rtf_folder <- function(folder) {
+    folder <- normalizePath(folder, winslash = "/", mustWork = FALSE)
+    if (!dir.exists(folder)) {
+      showNotification("Folder not found. Check the path and try again.", type = "error")
+      return()
+    }
     rtf_folder_path(folder)
-
     rtf_files <- list.files(folder, pattern = "\\.rtf$", ignore.case = TRUE)
     if (length(rtf_files) == 0L) {
       available_tables(character())
-      showNotification("No RTF files found in folder", type = "warning")
+      showNotification("No RTF files found in that folder.", type = "warning")
       return()
     }
     tbl_names  <- tools::file_path_sans_ext(rtf_files)
@@ -267,15 +268,33 @@ server <- function(input, output, session) {
     rtf_paths(setNames(as.list(full_paths), tbl_names))
     table_info_cache(list())
     parse_cache(list())
-    showNotification(paste("Found", length(rtf_files), "RTF files"), type = "message")
+    showNotification(paste("Found", length(rtf_files), "RTF files."), type = "message")
+  }
+
+  # Show native folder picker button only when inside RStudio Desktop
+  output$folder_picker_btn <- renderUI({
+    if (!isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(NULL)
+    actionButton("pick_folder_rstudio", "Choose RTF Folder\u2026",
+                 class = "btn-primary",
+                 style = "width:100%;")
   })
 
-  output$rtf_folder_display <- renderUI({
-    folder <- rtf_folder_path()
-    if (!is.null(folder)) {
-      p(style = "font-size:0.8em;color:#555;margin:4px 0 0;word-break:break-all;", folder)
-    }
+  observeEvent(input$pick_folder_rstudio, {
+    folder <- tryCatch(
+      rstudioapi::selectDirectory(caption = "Select RTF folder"),
+      error = function(e) NULL
+    )
+    if (is.null(folder) || !nzchar(folder)) return()
+    load_rtf_folder(folder)
+    updateTextInput(session, "rtf_folder_manual", value = folder)
   })
+
+  # Handle manual path entry — fires on Enter (input value change)
+  observeEvent(input$rtf_folder_manual, {
+    path <- trimws(input$rtf_folder_manual)
+    if (!nzchar(path)) return()
+    load_rtf_folder(path)
+  }, ignoreInit = TRUE)
 
   output$rtf_status <- renderUI({
     tbls <- available_tables()
