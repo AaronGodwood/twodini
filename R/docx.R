@@ -307,17 +307,23 @@ close_docx <- function(session, output_path) {
 #' @param selections Named list: row_index (as character) -> list(cols, row_start,
 #'   row_end, parameters, timelines)
 #' @param output_path Path to write the final .docx
-process_document <- function(word_path, config, rtf_paths, selections, output_path) {
+process_document <- function(word_path, config, rtf_paths, selections, output_path,
+                             progress_cb = NULL) {
   session <- open_docx(word_path)
   on.exit(unlink(session$tmp_dir, recursive = TRUE), add = TRUE)
 
-  # row index (as character) -> "ok" | error message string
-  status <- vector("list", nrow(config))
-  names(status) <- as.character(seq_len(nrow(config)))
+  n_rows <- nrow(config)
 
-  for (i in seq_len(nrow(config))) {
+  # row index (as character) -> "ok" | error message string
+  status <- vector("list", n_rows)
+  names(status) <- as.character(seq_len(n_rows))
+
+  for (i in seq_len(n_rows)) {
     bm_name  <- config$Bookmark[i]
     tbl_name <- config$Table[i]
+
+    if (is.function(progress_cb))
+      progress_cb(i, n_rows, sprintf("Injecting %s\u2026", bm_name))
 
     if (!tbl_name %in% names(rtf_paths)) {
       status[[i]] <- "RTF file not found in folder"

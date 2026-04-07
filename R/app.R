@@ -1010,13 +1010,23 @@ server <- function(input, output, session) {
         showNotification("No table mappings defined", type = "error"); return()
       }
 
+      n_rows <- nrow(config)
       status <- tryCatch(
-        process_document(
-          word_path   = input$word_file$datapath,
-          config      = config,
-          rtf_paths   = rtf_paths(),
-          selections  = table_selections(),
-          output_path = file
+        withProgress(
+          message = "Generating document\u2026",
+          value   = 0,
+          {
+            process_document(
+              word_path   = input$word_file$datapath,
+              config      = config,
+              rtf_paths   = rtf_paths(),
+              selections  = table_selections(),
+              output_path = file,
+              progress_cb = function(i, n, msg) {
+                incProgress(1 / n, detail = msg)
+              }
+            )
+          }
         ),
         error = function(e) {
           showNotification(paste("Error generating document:", conditionMessage(e)), type = "error")
