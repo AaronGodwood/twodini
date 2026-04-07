@@ -194,8 +194,7 @@ inject_table <- function(session, bookmark_name, xml_string) {
   para_node <- session$jump_table[[bookmark_name]]
 
   if (is.null(para_node)) {
-    warning(sprintf("Bookmark '%s' not found in document.", bookmark_name))
-    return(invisible(FALSE))
+    stop(err_bookmark_missing(bookmark_name))
   }
 
   xml_add_sibling(para_node, read_xml(xml_string), .where = "after")
@@ -218,8 +217,7 @@ inject_image <- function(session, bookmark_name, png_bytes, width_twips, height_
   para_node <- session$jump_table[[bookmark_name]]
 
   if (is.null(para_node)) {
-    warning(sprintf("Bookmark '%s' not found in document.", bookmark_name))
-    return(invisible(FALSE))
+    stop(err_bookmark_missing(bookmark_name))
   }
 
   # Scale to text width maintaining aspect ratio
@@ -326,21 +324,24 @@ process_document <- function(word_path, config, rtf_paths, selections, output_pa
       progress_cb(i, n_rows, sprintf("Injecting %s\u2026", bm_name))
 
     if (!tbl_name %in% names(rtf_paths)) {
-      status[[i]] <- "RTF file not found in folder"
+      status[[i]] <- err_rtf_unreadable(tbl_name, "file not found in RTF folder")
       next
     }
 
     rtf_path <- rtf_paths[[tbl_name]]
 
     if (is_image_rtf(rtf_path)) {
-      img <- extract_png(rtf_path)
-      if (is.null(img)) {
-        status[[i]] <- "Could not extract PNG from RTF"
-        next
-      }
+      img <- tryCatch(
+        extract_png(rtf_path),
+        error = function(e) {
+          status[[i]] <<- err_image_extract_failed(rtf_path, e)
+          NULL
+        }
+      )
+      if (is.null(img)) next
       tryCatch(
         inject_image(session, bm_name, img$png_bytes, img$width_twips, img$height_twips),
-        error = function(e) status[[i]] <<- conditionMessage(e)
+        error = function(e) status[[i]] <<- err_image_inject_failed(bm_name, e)
       )
 
     } else {
@@ -357,7 +358,7 @@ process_document <- function(word_path, config, rtf_paths, selections, output_pa
           text_width_twips     = tw_twips
         )
         inject_table(session, bm_name, xml_str)
-      }, error = function(e) status[[i]] <<- conditionMessage(e))
+      }, error = function(e) status[[i]] <<- err_xml_inject_failed(bm_name, e))
     }
   }
 
