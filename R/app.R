@@ -71,6 +71,13 @@ ui <- fluidPage(
       }
     ")),
     tags$script(HTML("
+      Shiny.addCustomMessageHandler('resetSelectionPane', function(_) {
+        // Clear JS-side exclusion state so the re-rendered pane starts fresh
+        Shiny.setInputValue('preview_excluded_cols',         [], {priority:'event'});
+        Shiny.setInputValue('preview_excluded_rows',         [], {priority:'event'});
+        Shiny.setInputValue('preview_excluded_header_rows',  [], {priority:'event'});
+      });
+
       $(function() {
         var btn = document.getElementById('download_result');
         if (!btn) return;
@@ -143,7 +150,8 @@ ui <- fluidPage(
                               style = "margin-top:15px;")
            ),
 
-           uiOutput("filter_panel")
+           uiOutput("filter_panel"),
+           uiOutput("reset_row_btn")
     ),
 
     # Right panel: two-pane interactive preview 
@@ -710,6 +718,40 @@ server <- function(input, output, session) {
           )
         }
     )
+  })
+
+  # Reset button — shown when a row with selections is active
+  output$reset_row_btn <- renderUI({
+    row <- current_row_index()
+    if (is.null(row)) return(NULL)
+    sel <- table_selections()[[as.character(row)]]
+    has_selections <- !is.null(sel) && (
+      length(sel$excluded_cols)        > 0L ||
+      length(sel$excluded_rows)        > 0L ||
+      length(sel$excluded_header_rows) > 0L ||
+      !is.null(sel$parameters)         ||
+      !is.null(sel$timelines)
+    )
+    if (!has_selections) return(NULL)
+    div(style = "margin-top:6px;text-align:right;",
+        actionLink("reset_row", "Reset selections for this row",
+                   style = "font-size:0.8em;color:#888;"))
+  })
+
+  observeEvent(input$reset_row, {
+    row <- current_row_index()
+    if (is.null(row)) return()
+    sels <- isolate(table_selections())
+    sels[[as.character(row)]] <- list(
+      excluded_cols        = integer(),
+      excluded_rows        = integer(),
+      excluded_header_rows = integer(),
+      parameters           = NULL,
+      timelines            = NULL
+    )
+    table_selections(sels)
+    # Tell JS to clear its exclusion arrays and re-apply styles
+    session$sendCustomMessage("resetSelectionPane", list())
   })
 
   # SAVE SELECTIONS WHEN INPUTS CHANGE
