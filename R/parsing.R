@@ -679,9 +679,9 @@ is_image_rtf <- function(path) {
 
 #' Extract the first PNG image from an RTF file
 #'
-#' Locates the first {\\pict ... \\pngblip ... <hex>} group, decodes the
+#' Locates the first \code{\\{\\pict ... \\pngblip ... <hex>\\}} group, decodes the
 #' hex-encoded bytes to raw, and returns the image data plus its declared
-#' dimensions in twips (\\picwgoal / \\pichgoal).
+#' dimensions in twips (\code{\\picwgoal} / \code{\\pichgoal}).
 #'
 #' @param path Path to the .rtf file
 #' @return list(png_bytes = raw, width_twips = integer, height_twips = integer)

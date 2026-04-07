@@ -206,7 +206,7 @@ inject_table <- function(session, bookmark_name, xml_string) {
 #'
 #' Writes the PNG into word/media/, registers the relationship, then inserts
 #' a minimal <w:drawing> block. The image is scaled to the document text width
-#' maintaining the original aspect ratio from the RTF \picwgoal / \pichgoal.
+#' maintaining the original aspect ratio from the RTF \code{\\picwgoal} / \code{\\pichgoal}.
 #'
 #' @param session A docx session returned by open_docx()
 #' @param bookmark_name Name of the bookmark

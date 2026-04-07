@@ -257,6 +257,7 @@ build_html_selection <- function(combined,
 #' @param excluded_header_rows Integer vector of 1-based header row indices
 #' @param parameters Character vector of parameter values to keep (NULL = all)
 #' @param timelines Character vector of timeline labels to keep (NULL = all)
+#' @param pages Pre-parsed RTF pages (output of parse_rtf()); parsed from path if NULL
 #' @return HTML string
 get_table_html_selection <- function(path,
                                      excluded_cols        = NULL,
@@ -286,6 +287,7 @@ get_table_html_selection <- function(path,
 #' @param excluded_header_rows Integer vector of 1-based header row indices
 #' @param parameters Character vector of parameter values to keep (NULL = all)
 #' @param timelines Character vector of timeline labels to keep (NULL = all)
+#' @param pages Pre-parsed RTF pages (output of parse_rtf()); parsed from path if NULL
 #' @return HTML string
 get_table_html_output <- function(path,
                                   excluded_cols        = NULL,
@@ -306,6 +308,7 @@ get_table_html_output <- function(path,
 #' Generate full HTML preview for an RTF file
 #'
 #' @param path Path to the .rtf file
+#' @param pages Pre-parsed RTF pages (output of parse_rtf()); parsed from path if NULL
 #' @return HTML string
 get_table_html <- function(path, pages = NULL) {
   if (is.null(pages)) pages <- parse_rtf(path)

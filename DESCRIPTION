@@ -16,6 +16,7 @@ Imports:
     base64enc,
     zip,
     readxl,
+    rstudioapi,
     writexl
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

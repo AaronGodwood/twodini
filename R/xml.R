@@ -178,6 +178,7 @@ build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
 #' @param parameters Character vector of parameter values to keep (NULL = all)
 #' @param timelines Character vector of timeline labels to keep (NULL = all)
 #' @param text_width_twips Target table width in twips (NULL = use RTF widths)
+#' @param pages Pre-parsed RTF pages (output of parse_rtf()); parsed from path if NULL
 #' @return Character string containing a <w:tbl> XML fragment
 get_table_xml <- function(path,
                            excluded_cols        = NULL,
