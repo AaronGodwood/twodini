@@ -138,6 +138,12 @@ ui <- fluidPage(
                    actionButton("add_row",    "Add Row",    class = "btn-outline-secondary"),
                    actionButton("remove_row", "Remove Row", class = "btn-outline-secondary"),
                    actionButton("clear_all",  "Clear All",  class = "btn-outline-danger"),
+                   actionButton("fill_bookmarks", "Add All Bookmarks",
+                                class = "btn-outline-secondary",
+                                title = "Add a row for each bookmark not already in the grid"),
+                   actionButton("auto_match", "Auto-match",
+                                class = "btn-outline-primary",
+                                title = "Fill blank cells with the best bookmark/table match"),
                    fileInput("import_excel", NULL, accept = ".xlsx",
                              placeholder = "Import Excel...",
                              buttonLabel = "Import Excel",
@@ -316,6 +322,30 @@ server <- function(input, output, session) {
 
   
 
+  # Fill blank Bookmark/Table cells with their best fuzzy match against the
+  # loaded bookmark names / RTF table names. Never overwrites a non-empty cell.
+  # score_floor guards against filling unrelated sheets with noise (bulk button);
+  # pass 0 to always take the best guess (live per-row suggestion).
+  fill_suggestions <- function(df, score_floor = 0) {
+    bm_names <- names(available_bookmarks())
+    tbls     <- available_tables()
+    if (length(bm_names) == 0L && length(tbls) == 0L) return(df)
+
+    for (i in seq_len(nrow(df))) {
+      b <- trimws(df$Bookmark[i])
+      t <- trimws(df$Table[i])
+
+      if (nzchar(b) && !nzchar(t) && length(tbls) > 0L) {
+        m <- best_match(b, tbls)
+        if (!is.na(m$match) && m$score >= score_floor) df$Table[i] <- m$match
+      } else if (nzchar(t) && !nzchar(b) && length(bm_names) > 0L) {
+        m <- best_match(t, bm_names)
+        if (!is.na(m$match) && m$score >= score_floor) df$Bookmark[i] <- m$match
+      }
+    }
+    df
+  }
+
   output$config_table <- renderRHandsontable({
     df <- config_data()
     if (nrow(df) == 0) {
@@ -346,7 +376,68 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$config_table, {
-    if (!is.null(input$config_table)) config_data(hot_to_r(input$config_table))
+    if (is.null(input$config_table)) return()
+    df <- hot_to_r(input$config_table)
+    # Live per-row suggestion: fill a blank partner cell for any row where the
+    # other cell was just set. Blank-only + change-detection keeps this stable
+    # (the re-render feeds back through this observer but produces no new change).
+    suggested <- fill_suggestions(df, score_floor = 0)
+    if (!identical(suggested, df)) df <- suggested
+    config_data(df)
+  })
+
+  observeEvent(input$auto_match, {
+    df <- config_data()
+    if (length(available_bookmarks()) == 0L && length(available_tables()) == 0L) {
+      showNotification("Load a Word document and RTF folder first", type = "warning")
+      return()
+    }
+    filled <- fill_suggestions(df, score_floor = 0.12)
+    n_new  <- sum(nzchar(trimws(unlist(filled[c("Bookmark", "Table")]))) &
+                  !nzchar(trimws(unlist(df[c("Bookmark", "Table")]))))
+    config_data(filled)
+    showNotification(
+      if (n_new > 0L) sprintf("Auto-match filled %d cell%s", n_new,
+                              if (n_new == 1L) "" else "s")
+      else "No confident matches to fill",
+      type = if (n_new > 0L) "message" else "default"
+    )
+  })
+
+  observeEvent(input$fill_bookmarks, {
+    bm_names <- names(available_bookmarks())
+    if (length(bm_names) == 0L) {
+      showNotification("Load a Word document with bookmarks first", type = "warning")
+      return()
+    }
+
+    df       <- config_data()
+    existing <- trimws(df$Bookmark)
+    missing  <- setdiff(bm_names, existing[nzchar(existing)])
+    if (length(missing) == 0L) {
+      showNotification("All bookmarks are already in the grid", type = "default")
+      return()
+    }
+
+    # Reuse rows that have a blank Bookmark first, then append the remainder,
+    # so we don't leave the initial placeholder rows empty above the new ones.
+    blank_rows <- which(!nzchar(existing))
+    n_reuse    <- min(length(blank_rows), length(missing))
+    if (n_reuse > 0L) {
+      df$Bookmark[blank_rows[seq_len(n_reuse)]] <- missing[seq_len(n_reuse)]
+    }
+    remainder <- missing[seq_len(length(missing) - n_reuse) + n_reuse]
+    if (length(remainder) > 0L) {
+      df <- rbind(df, data.frame(Bookmark = remainder, Table = "",
+                                 stringsAsFactors = FALSE))
+    }
+
+    config_data(df)
+    showNotification(
+      sprintf("Added %d bookmark%s", length(missing),
+              if (length(missing) == 1L) "" else "s"),
+      type = "message"
+    )
   })
 
   observeEvent(input$add_row, {
