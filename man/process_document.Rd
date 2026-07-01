@@ -4,7 +4,14 @@
 \alias{process_document}
 \title{Process a Word document: inject all configured RTF content at bookmarks}
 \usage{
-process_document(word_path, config, rtf_paths, selections, output_path)
+process_document(
+  word_path,
+  config,
+  rtf_paths,
+  selections,
+  output_path,
+  progress_cb = NULL
+)
 }
 \arguments{
 \item{word_path}{Path to the source .docx file}
@@ -17,6 +24,9 @@ process_document(word_path, config, rtf_paths, selections, output_path)
 row_end, parameters, timelines)}
 
 \item{output_path}{Path to write the final .docx}
+
+\item{progress_cb}{Optional callback \code{function(i, n, msg)} invoked once
+per config row for progress reporting; \code{NULL} disables reporting.}
 }
 \description{
 Auto-detects whether each RTF file contains an image (\\pngblip) or a

@@ -1,5 +1,3 @@
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-
 #' Return the Houdini Shiny application object
 #'
 #' Called internally by \code{\link{run_app}}. You can also pass the result
@@ -57,6 +55,8 @@ ui <- fluidPage(
       .sel-pane tr[data-row] { cursor: pointer; }
       .preview-centred table { margin-left: auto; margin-right: auto; }
       @keyframes spin { to { transform: rotate(360deg); } }
+      #rtf_folder_manual { margin-top: 6px; font-size: 0.82em; }
+      #rtf_folder_manual .form-control { font-size: 0.82em; }
       .btn-spinner {
         display: inline-block;
         width: 14px; height: 14px;
@@ -69,6 +69,13 @@ ui <- fluidPage(
       }
     ")),
     tags$script(HTML("
+      Shiny.addCustomMessageHandler('resetSelectionPane', function(_) {
+        // Clear JS-side exclusion state so the re-rendered pane starts fresh
+        Shiny.setInputValue('preview_excluded_cols',         [], {priority:'event'});
+        Shiny.setInputValue('preview_excluded_rows',         [], {priority:'event'});
+        Shiny.setInputValue('preview_excluded_header_rows',  [], {priority:'event'});
+      });
+
       $(function() {
         var btn = document.getElementById('download_result');
         if (!btn) return;
@@ -100,8 +107,9 @@ ui <- fluidPage(
              uiOutput("bookmark_status"),
 
              h4("2. RTF Source", class = "section-header"),
-             actionButton("pick_folder", "Choose RTF Folder...", class = "btn-primary"),
-             uiOutput("rtf_folder_display"),
+             uiOutput("folder_picker_btn"),
+             textInput("rtf_folder_manual", NULL,
+                       placeholder = "Paste folder path and press Enter\u2026"),
              uiOutput("rtf_status"),
 
              h4("3. Generate", class = "section-header"),
@@ -140,7 +148,8 @@ ui <- fluidPage(
                               style = "margin-top:15px;")
            ),
 
-           uiOutput("filter_panel")
+           uiOutput("filter_panel"),
+           uiOutput("reset_row_btn")
     ),
 
     # Right panel: two-pane interactive preview 
@@ -245,20 +254,18 @@ server <- function(input, output, session) {
 
   # RTF FOLDER
 
-
-  observeEvent(input$pick_folder, {
-    folder <- tryCatch(
-      rstudioapi::selectDirectory(caption = "Select RTF folder"),
-      error = function(e) NULL
-    )
-    if (is.null(folder) || !nzchar(folder)) return()
-
+  # Shared helper: load RTF files from a validated folder path
+  load_rtf_folder <- function(folder) {
+    folder <- normalizePath(folder, winslash = "/", mustWork = FALSE)
+    if (!dir.exists(folder)) {
+      showNotification("Folder not found. Check the path and try again.", type = "error")
+      return()
+    }
     rtf_folder_path(folder)
-
     rtf_files <- list.files(folder, pattern = "\\.rtf$", ignore.case = TRUE)
     if (length(rtf_files) == 0L) {
       available_tables(character())
-      showNotification("No RTF files found in folder", type = "warning")
+      showNotification("No RTF files found in that folder.", type = "warning")
       return()
     }
     tbl_names  <- tools::file_path_sans_ext(rtf_files)
@@ -267,15 +274,33 @@ server <- function(input, output, session) {
     rtf_paths(setNames(as.list(full_paths), tbl_names))
     table_info_cache(list())
     parse_cache(list())
-    showNotification(paste("Found", length(rtf_files), "RTF files"), type = "message")
+    showNotification(paste("Found", length(rtf_files), "RTF files."), type = "message")
+  }
+
+  # Show native folder picker button only when inside RStudio Desktop
+  output$folder_picker_btn <- renderUI({
+    if (!isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(NULL)
+    actionButton("pick_folder_rstudio", "Choose RTF Folder\u2026",
+                 class = "btn-primary",
+                 style = "width:100%;")
   })
 
-  output$rtf_folder_display <- renderUI({
-    folder <- rtf_folder_path()
-    if (!is.null(folder)) {
-      p(style = "font-size:0.8em;color:#555;margin:4px 0 0;word-break:break-all;", folder)
-    }
+  observeEvent(input$pick_folder_rstudio, {
+    folder <- tryCatch(
+      rstudioapi::selectDirectory(caption = "Select RTF folder"),
+      error = function(e) NULL
+    )
+    if (is.null(folder) || !nzchar(folder)) return()
+    load_rtf_folder(folder)
+    updateTextInput(session, "rtf_folder_manual", value = folder)
   })
+
+  # Handle manual path entry — fires on Enter (input value change)
+  observeEvent(input$rtf_folder_manual, {
+    path <- trimws(input$rtf_folder_manual)
+    if (!nzchar(path)) return()
+    load_rtf_folder(path)
+  }, ignoreInit = TRUE)
 
   output$rtf_status <- renderUI({
     tbls <- available_tables()
@@ -429,20 +454,65 @@ server <- function(input, output, session) {
     cache <- table_info_cache()
     sels  <- table_selections()
 
+    # Pre-compute duplicate bookmark and table name sets (cross-row checks)
+    all_bm_vals  <- trimws(df$Bookmark)
+    all_tbl_vals <- trimws(df$Table)
+    nonempty_bms  <- all_bm_vals[nzchar(all_bm_vals)]
+    nonempty_tbls <- all_tbl_vals[nzchar(all_tbl_vals)]
+    dup_bookmarks <- unique(nonempty_bms[duplicated(nonempty_bms)])
+    dup_tables    <- unique(nonempty_tbls[duplicated(nonempty_tbls)])
+
     lapply(seq_len(nrow(df)), function(i) {
       bm_val  <- trimws(df$Bookmark[i])
       tbl_val <- trimws(df$Table[i])
 
-      if (!nzchar(bm_val) && !nzchar(tbl_val)) return(list(type = "", msg = ""))
+      if (!nzchar(bm_val) && !nzchar(tbl_val)) return(list(type = "", msg = "", hint = NULL))
 
       errors   <- character()
       warnings <- character()
+      hints    <- character()
 
-      if (nzchar(bm_val) && length(bm) > 0L && !bm_val %in% names(bm))
-        errors <- c(errors, paste0("Bookmark '", bm_val, "' not found in Word document"))
+      # Half-complete row
+      if (nzchar(bm_val) && !nzchar(tbl_val)) {
+        warnings <- c(warnings, "Bookmark set but no table selected")
+        hints    <- c(hints, "Select an RTF table in the Table column for this row.")
+      }
+      if (!nzchar(bm_val) && nzchar(tbl_val)) {
+        warnings <- c(warnings, "Table set but no bookmark selected")
+        hints    <- c(hints, "Select a bookmark in the Bookmark column for this row.")
+      }
 
-      if (nzchar(tbl_val) && length(tbls) > 0L && !tbl_val %in% tbls)
-        errors <- c(errors, paste0("Table '", tbl_val, "' not found in RTF folder"))
+      # Bookmark not in Word document
+      if (nzchar(bm_val) && length(bm) > 0L && !bm_val %in% names(bm)) {
+        e <- err_bookmark_missing(bm_val)
+        errors <- c(errors, conditionMessage(e))
+        hints  <- c(hints,  e$hint)
+      }
+
+      # Duplicate bookmark across rows
+      if (nzchar(bm_val) && bm_val %in% dup_bookmarks) {
+        dup_rows <- which(all_bm_vals == bm_val)
+        e <- err_bookmark_duplicate(bm_val, dup_rows)
+        errors <- c(errors, conditionMessage(e))
+        hints  <- c(hints,  e$hint)
+      }
+
+      # Table not in RTF folder
+      if (nzchar(tbl_val) && length(tbls) > 0L && !tbl_val %in% tbls) {
+        e <- err_rtf_unreadable(tbl_val, "not found in RTF folder")
+        errors <- c(errors, conditionMessage(e))
+        hints  <- c(hints,  e$hint)
+      }
+
+      # Same RTF mapped to multiple bookmarks (warning only — may be intentional)
+      if (nzchar(tbl_val) && tbl_val %in% dup_tables) {
+        dup_rows <- which(all_tbl_vals == tbl_val)
+        warnings <- c(warnings, sprintf(
+          "Table '%s' is mapped in multiple rows: %s",
+          tbl_val, paste(dup_rows, collapse = ", ")
+        ))
+        hints <- c(hints, "This is allowed but unusual. Verify that both bookmarks should receive the same table.")
+      }
 
       if (nzchar(tbl_val) && length(paths) > 0L && tbl_val %in% names(paths)) {
         info <- cache[[tbl_val]]
@@ -454,36 +524,45 @@ server <- function(input, output, session) {
           if (!is.null(sel$parameters) && length(sel$parameters) > 0L &&
               length(info$parameters) > 0L) {
             bad_p <- setdiff(sel$parameters, info$parameters)
-            if (length(bad_p) > 0L)
+            if (length(bad_p) > 0L) {
               warnings <- c(warnings,
                 paste0("Unknown parameter(s): ", paste(bad_p, collapse = ", ")))
+              hints <- c(hints,
+                "These parameter values were not found in the RTF file. They may have been renamed or removed.")
+            }
           }
           if (!is.null(sel$timelines) && length(sel$timelines) > 0L &&
               length(info$timelines) > 0L) {
             bad_t <- setdiff(sel$timelines, info$timelines)
-            if (length(bad_t) > 0L)
+            if (length(bad_t) > 0L) {
               warnings <- c(warnings,
                 paste0("Unknown timeline(s): ", paste(bad_t, collapse = ", ")))
+              hints <- c(hints,
+                "These timeline labels were not found in the RTF file. Re-open the table and reselect timelines.")
+            }
           }
           if (!is.null(sel$excluded_cols) && length(sel$excluded_cols) > 0L &&
               info$n_cols > 0L) {
             bad_c <- sel$excluded_cols[
               sel$excluded_cols < 1L | sel$excluded_cols > info$n_cols
             ]
-            if (length(bad_c) > 0L)
-              warnings <- c(warnings,
-                paste0("Excluded column index(es) out of range: ",
-                       paste(bad_c, collapse = ", ")))
+            if (length(bad_c) > 0L) {
+              e <- err_exclusion_out_of_range(bm_val, bad_c, info$n_cols)
+              warnings <- c(warnings, conditionMessage(e))
+              hints    <- c(hints,    e$hint)
+            }
           }
         }
       }
 
-      if (length(errors) > 0L)
-        return(list(type = "error",   msg = paste(errors,   collapse = "; ")))
-      if (length(warnings) > 0L)
-        return(list(type = "warning", msg = paste(warnings, collapse = "; ")))
+      hint_str <- if (length(hints) > 0L) paste(unique(hints), collapse = " ") else NULL
 
-      list(type = "", msg = "")
+      if (length(errors) > 0L)
+        return(list(type = "error",   msg = paste(errors,   collapse = "; "), hint = hint_str))
+      if (length(warnings) > 0L)
+        return(list(type = "warning", msg = paste(warnings, collapse = "; "), hint = hint_str))
+
+      list(type = "", msg = "", hint = NULL)
     })
   })
 
@@ -513,7 +592,11 @@ server <- function(input, output, session) {
              background:%s;border:1px solid %s;font-size:0.82em;", bg, bdr),
           strong(paste0(ico, " ", lbl, ": ")), row_lbl,
           tags$br(),
-          span(style = "color:#555;", w$msg))
+          span(style = "color:#555;", w$msg),
+          if (!is.null(w$hint)) tagList(tags$br(),
+            span(style = "color:#777;font-style:italic;", paste0("Hint: ", w$hint))
+          )
+      )
     })
 
     items <- Filter(Negate(is.null), items)
@@ -633,6 +716,40 @@ server <- function(input, output, session) {
           )
         }
     )
+  })
+
+  # Reset button — shown when a row with selections is active
+  output$reset_row_btn <- renderUI({
+    row <- current_row_index()
+    if (is.null(row)) return(NULL)
+    sel <- table_selections()[[as.character(row)]]
+    has_selections <- !is.null(sel) && (
+      length(sel$excluded_cols)        > 0L ||
+      length(sel$excluded_rows)        > 0L ||
+      length(sel$excluded_header_rows) > 0L ||
+      !is.null(sel$parameters)         ||
+      !is.null(sel$timelines)
+    )
+    if (!has_selections) return(NULL)
+    div(style = "margin-top:6px;text-align:right;",
+        actionLink("reset_row", "Reset selections for this row",
+                   style = "font-size:0.8em;color:#888;"))
+  })
+
+  observeEvent(input$reset_row, {
+    row <- current_row_index()
+    if (is.null(row)) return()
+    sels <- isolate(table_selections())
+    sels[[as.character(row)]] <- list(
+      excluded_cols        = integer(),
+      excluded_rows        = integer(),
+      excluded_header_rows = integer(),
+      parameters           = NULL,
+      timelines            = NULL
+    )
+    table_selections(sels)
+    # Tell JS to clear its exclusion arrays and re-apply styles
+    session$sendCustomMessage("resetSelectionPane", list())
   })
 
   # SAVE SELECTIONS WHEN INPUTS CHANGE
@@ -941,11 +1058,14 @@ server <- function(input, output, session) {
           err     <- gen_status[[as.character(i)]]
 
           if (!is.null(err)) {
+            err_msg  <- if (inherits(err, "houdini_error")) conditionMessage(err) else as.character(err)
+            err_hint <- if (inherits(err, "houdini_error")) err$hint else NULL
             lines <- c(lines,
               paste0("Row       : ", i),
               paste0("Bookmark  : ", bm_val),
               paste0("Table     : ", tbl_val, ".rtf"),
-              paste0("Status    : ERROR - ", err),
+              paste0("Status    : ERROR - ", err_msg),
+              if (!is.null(err_hint)) paste0("Hint      : ", err_hint) else NULL,
               ""
             )
           } else {
@@ -1010,13 +1130,23 @@ server <- function(input, output, session) {
         showNotification("No table mappings defined", type = "error"); return()
       }
 
+      n_rows <- nrow(config)
       status <- tryCatch(
-        process_document(
-          word_path   = input$word_file$datapath,
-          config      = config,
-          rtf_paths   = rtf_paths(),
-          selections  = table_selections(),
-          output_path = file
+        withProgress(
+          message = "Generating document\u2026",
+          value   = 0,
+          {
+            process_document(
+              word_path   = input$word_file$datapath,
+              config      = config,
+              rtf_paths   = rtf_paths(),
+              selections  = table_selections(),
+              output_path = file,
+              progress_cb = function(i, n, msg) {
+                incProgress(1 / n, detail = msg)
+              }
+            )
+          }
         ),
         error = function(e) {
           showNotification(paste("Error generating document:", conditionMessage(e)), type = "error")
