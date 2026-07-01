@@ -24,6 +24,9 @@ process_document(
 row_end, parameters, timelines)}
 
 \item{output_path}{Path to write the final .docx}
+
+\item{progress_cb}{Optional callback \code{function(i, n, msg)} invoked once
+per config row for progress reporting; \code{NULL} disables reporting.}
 }
 \description{
 Auto-detects whether each RTF file contains an image (\\pngblip) or a

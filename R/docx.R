@@ -305,6 +305,8 @@ close_docx <- function(session, output_path) {
 #' @param selections Named list: row_index (as character) -> list(cols, row_start,
 #'   row_end, parameters, timelines)
 #' @param output_path Path to write the final .docx
+#' @param progress_cb Optional callback \code{function(i, n, msg)} invoked once
+#'   per config row for progress reporting; \code{NULL} disables reporting.
 process_document <- function(word_path, config, rtf_paths, selections, output_path,
                              progress_cb = NULL) {
   session <- open_docx(word_path)
