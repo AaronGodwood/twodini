@@ -4,7 +4,14 @@
 \alias{process_document}
 \title{Process a Word document: inject all configured RTF content at bookmarks}
 \usage{
-process_document(word_path, config, rtf_paths, selections, output_path)
+process_document(
+  word_path,
+  config,
+  rtf_paths,
+  selections,
+  output_path,
+  progress_cb = NULL
+)
 }
 \arguments{
 \item{word_path}{Path to the source .docx file}

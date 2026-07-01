@@ -1,13 +1,20 @@
 # parsing.R - RTF -> structured R data
 
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-
-# Check if C routines are available (package installed with compiled code)
-.has_c <- tryCatch(is.function(.Call), error = function(e) FALSE)
-.use_c <- .has_c && tryCatch({
-  getNativeSymbolInfo("C_find_matching_brace", PACKAGE = "houdini")
-  TRUE
-}, error = function(e) FALSE)
+# Whether the compiled C fast-path is available. Resolved lazily on first use
+# and cached: the DLL registered by useDynLib() is not guaranteed to be loaded
+# at the moment this file is sourced during namespace construction, so an eager
+# check here can spuriously report FALSE and silently disable the C path.
+.c_available <- local({
+  cached <- NA
+  function() {
+    if (!is.na(cached)) return(cached)
+    cached <<- tryCatch({
+      getNativeSymbolInfo("C_find_matching_brace", PACKAGE = "houdini")
+      TRUE
+    }, error = function(e) FALSE)
+    cached
+  }
+})
 
 # 1. LOW-LEVEL RTF HELPERS
 
@@ -61,7 +68,7 @@ rtf_unescape_r <- function(text) {
 }
 
 rtf_unescape <- function(text) {
-  if (.use_c) .Call(C_rtf_unescape, text) else rtf_unescape_r(text)
+  if (.c_available()) .Call(C_rtf_unescape, text) else rtf_unescape_r(text)
 }
 
 # Fast hex string to raw vector conversion.
@@ -107,7 +114,7 @@ find_matching_brace_r <- function(text, start) {
 }
 
 find_matching_brace <- function(text, start) {
-  if (.use_c) .Call(C_find_matching_brace, text, as.integer(start))
+  if (.c_available()) .Call(C_find_matching_brace, text, as.integer(start))
   else find_matching_brace_r(text, start)
 }
 
@@ -376,7 +383,7 @@ rtf_cell_to_text_r <- function(raw) {
 }
 
 rtf_cell_to_text <- function(raw) {
-  if (.use_c) .Call(C_rtf_cell_to_text, raw) else rtf_cell_to_text_r(raw)
+  if (.c_available()) .Call(C_rtf_cell_to_text, raw) else rtf_cell_to_text_r(raw)
 }
 
 # 5. PAGE PARSING

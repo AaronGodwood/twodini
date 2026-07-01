@@ -1,5 +1,3 @@
-`%||%` <- function(a, b) if (!is.null(a)) a else b
-
 #' Return the Houdini Shiny application object
 #'
 #' Called internally by \code{\link{run_app}}. You can also pass the result
