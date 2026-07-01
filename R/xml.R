@@ -79,9 +79,15 @@ xml_data_row <- function(row, is_last_data) {
 
   cells <- lapply(seq_along(row$cells), function(ci) {
     cell  <- row$cells[[ci]]
+    if (isTRUE(cell$colspan == 0L)) return("")  # merge continuation, omit
+
+    grid_span <- if (!is.null(cell$colspan) && cell$colspan > 1L) {
+      sprintf("<w:gridSpan w:val=\"%d\"/>", cell$colspan)
+    } else ""
+
     align <- if (!is.na(cell$align)) cell$align else if (ci == 1L) "left" else "center"
 
-    tc_pr   <- sprintf("<w:tcPr>%s<w:jc w:val=\"%s\"/></w:tcPr>", borders, align)
+    tc_pr   <- sprintf("<w:tcPr>%s%s<w:jc w:val=\"%s\"/></w:tcPr>", grid_span, borders, align)
     para_pr <- sprintf(
       "<w:pPr><w:jc w:val=\"%s\"/><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>",
       align

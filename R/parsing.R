@@ -18,53 +18,81 @@
 
 # 1. LOW-LEVEL RTF HELPERS
 
-# Read raw bytes and convert to UTF-8 string, handling CP1252/Latin-1
+# Read raw bytes and convert to UTF-8 string, handling CP1252/Latin-1.
+# readLines(encoding=) never errors on wrong encodings, it just mis-marks the
+# string - so detect real UTF-8 with validUTF8() and convert otherwise.
 rtf_read_raw <- function(path) {
-  lines <- tryCatch(
-    readLines(path, encoding = "UTF-8",   warn = FALSE),
-    error = function(e)
-    readLines(path, encoding = "latin1",  warn = FALSE)
-  )
-  text <- paste(lines, collapse = "\n")
+  bytes <- readBin(path, what = "raw", n = file.size(path))
+  bytes <- bytes[bytes != as.raw(0L)]
+  text  <- rawToChar(bytes)
+  if (validUTF8(text)) {
+    Encoding(text) <- "UTF-8"
+  } else {
+    # SAS/Word on Windows write CP1252 (latin1 plus smart quotes, dashes, ...)
+    text <- iconv(text, from = "CP1252", to = "UTF-8", sub = "?")
+  }
   # Normalise any residual \r\n or \r
   text <- gsub("\r\n", "\n", text, fixed = TRUE)
   gsub("\r",   "\n", text, fixed = TRUE)
 }
 
 # Resolve RTF escape sequences in a text string:
-#   \'xx  -> the character for hex xx (in latin1, then to UTF-8)
-#   \uN   -> Unicode code point N (followed by a fallback char we skip)
+#   \'xx  -> the character for hex xx (CP1252, converted to UTF-8)
+#   \uN   -> Unicode code point N, followed by \ucN fallback chars we skip
+#   \ucN  -> sets the fallback length for subsequent \uN escapes (default 1);
+#            consumed and not emitted
+# A fallback "character" may itself be a \'xx escape (counts as one).
 rtf_unescape_r <- function(text) {
-  # Handle \uN escapes: find all, replace in reverse order to preserve positions
-  m <- gregexpr("\\\\u(-?[0-9]+)\\??.", text, perl = TRUE)[[1]]
-  if (m[1L] != -1L) {
-    lens <- attr(m, "match.length")
-    for (i in rev(seq_along(m))) {
-      matched <- substr(text, m[i], m[i] + lens[i] - 1L)
-      n <- suppressWarnings(as.integer(sub("\\\\u(-?[0-9]+).*", "\\1", matched)))
-      if (is.na(n)) next
-      if (n < 0L) n <- n + 65536L
-      text <- paste0(substr(text, 1L, m[i] - 1L),
-                     intToUtf8(n),
-                     substr(text, m[i] + lens[i], nchar(text)))
-    }
-  }
+  if (!grepl("\\\\(u|')", text, perl = TRUE)) return(text)
 
-  # Handle \'xx hex escapes the same way
-  m <- gregexpr("\\\\'([0-9a-fA-F]{2})", text, perl = TRUE)[[1]]
-  if (m[1L] != -1L) {
-    lens <- attr(m, "match.length")
-    for (i in rev(seq_along(m))) {
-      hex <- substr(text, m[i] + 2L, m[i] + 3L)
+  n   <- nchar(text)
+  out <- character()
+  pos <- 1L
+  uc  <- 1L
+
+  repeat {
+    m <- regexpr("\\\\(uc[0-9]+|u-?[0-9]+|'[0-9a-fA-F]{2})",
+                 substr(text, pos, n), perl = TRUE)
+    if (m == -1L) {
+      out <- c(out, substr(text, pos, n))
+      break
+    }
+    start <- pos + m[1L] - 1L
+    len   <- attr(m, "match.length")
+    out   <- c(out, substr(text, pos, start - 1L))
+    tok   <- substr(text, start, start + len - 1L)
+    pos   <- start + len
+
+    if (startsWith(tok, "\\uc")) {
+      uc <- as.integer(substr(tok, 4L, len))
+      if (substr(text, pos, pos) == " ") pos <- pos + 1L  # delimiter
+    } else if (startsWith(tok, "\\u")) {
+      cp <- as.integer(substr(tok, 3L, len))
+      if (cp < 0L) cp <- cp + 65536L
+      out <- c(out, intToUtf8(cp))
+      if (substr(text, pos, pos) == " ") pos <- pos + 1L  # delimiter
+      # Skip the uc fallback characters; stop early at structure we shouldn't eat
+      k <- uc
+      while (k > 0L && pos <= n) {
+        ch <- substr(text, pos, pos)
+        if (ch == "\\") {
+          if (substr(text, pos + 1L, pos + 1L) == "'") pos <- pos + 4L else break
+        } else if (ch == "{" || ch == "}") {
+          break
+        } else {
+          pos <- pos + 1L
+        }
+        k <- k - 1L
+      }
+    } else {
+      # \'xx hex escape
+      hex <- substr(tok, 3L, 4L)
       ch  <- rawToChar(as.raw(strtoi(hex, 16L)))
-      ch  <- iconv(ch, from = "latin1", to = "UTF-8", sub = "?")
-      text <- paste0(substr(text, 1L, m[i] - 1L),
-                     ch,
-                     substr(text, m[i] + lens[i], nchar(text)))
+      out <- c(out, iconv(ch, from = "CP1252", to = "UTF-8", sub = "?"))
     }
   }
 
-  text
+  paste(out, collapse = "")
 }
 
 rtf_unescape <- function(text) {
@@ -364,15 +392,17 @@ rtf_cell_to_text_r <- function(raw) {
     new_text <- gsub("\\{((?:[^{}\\\\]|\\\\[a-zA-Z]+[-]?[0-9]*[ ]?)*)\\}",
                      "\\1", text, perl = TRUE)
     # Strip any remaining control words that were the only content
-    new_text <- gsub("\\{\\\\[a-zA-Z]+[-]?[0-9]*[ ]?\\}", "", new_text, perl = TRUE)
+    # (but not \uN / \ucN, which rtf_unescape decodes later)
+    new_text <- gsub("\\{\\\\(?!u-?[0-9]|uc[0-9])[a-zA-Z]+[-]?[0-9]*[ ]?\\}", "", new_text, perl = TRUE)
     if (identical(new_text, text)) break
     text <- new_text
   }
 
-  # Remove remaining RTF control words (\word or \word123)
-  text <- gsub("\\\\[a-zA-Z]+[-]?[0-9]*\\s?", "", text, perl = TRUE)
-  # Remove remaining control symbols (\<symbol>)
-  text <- gsub("\\\\.", "", text, perl = TRUE)
+  # Remove remaining RTF control words (\word or \word123), but preserve
+  # \uN and \ucN - they are decoded (not stripped) by rtf_unescape below
+  text <- gsub("\\\\(?!u-?[0-9]|uc[0-9])[a-zA-Z]+[-]?[0-9]*\\s?", "", text, perl = TRUE)
+  # Remove remaining control symbols (\<symbol>), preserving \'xx hex escapes
+  text <- gsub("\\\\(?!')[^a-zA-Z]", "", text, perl = TRUE)
   # Remove stray braces
   text <- gsub("[{}]", "", text, fixed = FALSE)
 
@@ -479,12 +509,19 @@ get_timelines <- function(pages) {
       if (length(row$cells) == 0L) next
       col1 <- trimws(row$cells[[1]]$text)
       if (nchar(col1) == 0L) next
-      rest_empty <- all(vapply(row$cells[-1], function(cell) nchar(trimws(cell$text)) == 0L, logical(1)))
+      rest_empty <- all(vapply(row$cells[-1], cell_effectively_empty, logical(1)))
       if (rest_empty) page_labels <- c(page_labels, col1)
     }
     labels[[pi]] <- page_labels
   }
   unique(unlist(labels, use.names = FALSE))
+}
+
+# A cell counts as empty for timeline-label detection if it has no text OR is
+# a merge continuation (parse_rtf_table copies the first cell's text into
+# continuations, so a label merged across the row would otherwise never match)
+cell_effectively_empty <- function(cell) {
+  isTRUE(cell$colspan == 0L) || nchar(trimws(cell$text)) == 0L
 }
 
 #' Get all unique parameter values across pages (excluding NA)
@@ -519,7 +556,7 @@ filter_timelines <- function(pages, timelines) {
 
       # Check if this row is a timeline label row
       rest_empty <- length(row$cells) <= 1L ||
-        all(vapply(row$cells[-1], function(cell) nchar(trimws(cell$text)) == 0L, logical(1)))
+        all(vapply(row$cells[-1], cell_effectively_empty, logical(1)))
 
       if (nchar(col1) > 0L && rest_empty && col1 %in% all_labels) {
         current_timeline <- col1
@@ -695,25 +732,38 @@ is_image_rtf <- function(path) {
 #'   or NULL if no PNG found
 extract_png <- function(path) {
   text <- rtf_read_raw(path)
+  n    <- nchar(text)
 
-  # Find the \pict group containing \pngblip
-  pict_pos <- regexpr("\\\\pict(?![a-zA-Z])", text, perl = TRUE)
-  if (pict_pos == -1L) return(NULL)
+  # Find the first \pict group that contains \pngblip. Earlier \pict groups
+  # may be WMF/EMF renditions of the same image, so keep scanning past them.
+  pict_text   <- NULL
+  search_from <- 1L
+  repeat {
+    m <- regexpr("\\\\pict(?![a-zA-Z])", substr(text, search_from, n), perl = TRUE)
+    if (m == -1L) return(NULL)
+    pict_pos <- search_from + m[1L] - 1L
 
-  # Walk back to opening brace
-  brace_pos <- NA_integer_
-  for (i in seq(pict_pos - 1L, max(1L, pict_pos - 5L), by = -1L)) {
-    if (substr(text, i, i) == "{") { brace_pos <- i; break }
+    # Walk back to opening brace
+    brace_pos <- NA_integer_
+    for (i in seq(pict_pos - 1L, max(1L, pict_pos - 5L), by = -1L)) {
+      if (substr(text, i, i) == "{") { brace_pos <- i; break }
+    }
+    if (is.na(brace_pos)) { search_from <- pict_pos + 5L; next }
+
+    end_pos <- find_matching_brace(text, brace_pos)
+    if (is.na(end_pos)) return(NULL)
+
+    candidate <- substr(text, brace_pos, end_pos)
+    if (grepl("\\\\pngblip(?![a-zA-Z])", candidate, perl = TRUE)) {
+      pict_text <- candidate
+      break
+    }
+    search_from <- end_pos + 1L
   }
-  if (is.na(brace_pos)) return(NULL)
 
-  end_pos <- find_matching_brace(text, brace_pos)
-  if (is.na(end_pos)) return(NULL)
-
-  pict_text <- substr(text, brace_pos, end_pos)
-
-  # Must contain \pngblip
-  if (!grepl("\\\\pngblip(?![a-zA-Z])", pict_text, perl = TRUE)) return(NULL)
+  # Drop {\*...} destination groups (e.g. {\*\blipuid <32 hex chars>}) so
+  # their hex payload can't be mistaken for image data below
+  pict_text <- gsub("\\{\\\\\\*[^{}]*\\}", "", pict_text, perl = TRUE)
 
   # Extract \picwgoal and \pichgoal
   w_match <- regmatches(pict_text, regexpr("\\\\picwgoal([0-9]+)", pict_text, perl = TRUE))
@@ -733,10 +783,6 @@ extract_png <- function(path) {
   # Keep only hex characters, strip everything else (whitespace, braces)
   hex_clean <- gsub("[^0-9a-fA-F]", "", hex_region, perl = TRUE)
   if (nchar(hex_clean) == 0L) return(NULL)
-  hex_match <- hex_clean  # reuse variable name for code below
-
-  # Decode hex string to raw bytes in chunks for speed
-  hex_clean <- gsub("\\s", "", hex_match, perl = TRUE)
   if (nchar(hex_clean) %% 2L != 0L) return(NULL)
   png_bytes <- hex_to_raw(hex_clean)
 

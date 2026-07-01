@@ -1,6 +1,6 @@
 # suggest_match.R - fuzzy pairing of bookmark names to RTF table names.
 #
-# Clinical/SAS outputs number tables (e.g. "14.1") and bookmarks tend to echo
+# SAS outputs number tables (e.g. "14.1") and bookmarks tend to echo
 # that number, so the strongest signal is a matching numeric key; shared word
 # tokens and raw edit distance are the fallbacks. Base R only (adist for edit
 # distance) - no stringdist dependency.

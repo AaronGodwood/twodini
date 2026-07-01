@@ -1,1 +1,1 @@
-houdini::run_app()
+houdini::houdini_app()

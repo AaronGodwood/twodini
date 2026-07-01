@@ -162,10 +162,16 @@ open_docx <- function(docx_path) {
     if (!is.null(para)) jump_table[[name]] <- para
   }
 
-  # Detect next available image index from existing media files
+  # Detect next available image index from existing media files.
+  # Template media names may be non-contiguous (image1, image3, ...), so take
+  # the max numeric suffix rather than counting files, or image names collide.
   media_dir   <- file.path(tmp, "word", "media")
-  existing    <- if (dir.exists(media_dir)) list.files(media_dir, pattern = "\\.png$") else character()
-  next_img_id <- length(existing) + 1L
+  existing    <- if (dir.exists(media_dir)) list.files(media_dir) else character()
+  existing_ids <- suppressWarnings(as.integer(
+    sub("^image([0-9]+)\\..*$", "\\1", existing[grepl("^image[0-9]+\\.", existing)])
+  ))
+  existing_ids <- existing_ids[!is.na(existing_ids)]
+  next_img_id  <- if (length(existing_ids) > 0L) max(existing_ids) + 1L else 1L
 
   # Text width in EMU (read once, used by every inject_image call)
   text_width_emu <- docx_text_width_emu(doc)

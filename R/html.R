@@ -38,10 +38,14 @@ html_data_row <- function(row, n_cols, is_last_data) {
   border_style <- if (is_last_data) "border-bottom:2px solid black;" else ""
   cells <- lapply(seq_along(row$cells), function(ci) {
     cell <- row$cells[[ci]]
+    if (isTRUE(cell$colspan == 0L)) return("")   # merge continuation, skip
+    span_attr <- if (!is.null(cell$colspan) && cell$colspan > 1L) {
+      sprintf(" colspan=\"%d\"", cell$colspan)
+    } else ""
     raw_align <- if (!is.null(cell$align) && !is.na(cell$align)) cell$align else if (ci == 1L) "left" else "center"
     align <- paste0("text-align:", raw_align)
     style <- trimws(paste0(border_style, "padding:0;", align), which = "left")
-    sprintf("<td style=\"%s\">%s</td>", style, htmlEscape(cell$text))
+    sprintf("<td%s style=\"%s\">%s</td>", span_attr, style, htmlEscape(cell$text))
   })
   paste0("<tr>", paste(cells, collapse = ""), "</tr>")
 }
@@ -203,8 +207,23 @@ build_html_selection <- function(combined,
     phys_col <- 1L
     cells <- character(length(row$cells))
     for (ci in seq_along(row$cells)) {
-      cell     <- row$cells[[ci]]
-      col_excl <- phys_col %in% excluded_cols
+      cell <- row$cells[[ci]]
+      if (isTRUE(cell$colspan == 0L)) {
+        cells[ci] <- ""                      # merge continuation, skip
+        next
+      }
+      span    <- if (!is.null(cell$colspan) && cell$colspan > 1L) cell$colspan else 1L
+      spanned <- seq(phys_col, phys_col + span - 1L)
+      col_excl <- any(spanned %in% excluded_cols)
+
+      dc <- if (span > 1L) {
+        paste0("[", paste(spanned, collapse = ","), "]")
+      } else {
+        as.character(phys_col)
+      }
+      phys_col <- phys_col + span
+
+      span_attr <- if (span > 1L) sprintf(" colspan=\"%d\"", span) else ""
       opacity  <- if (col_excl || row_excl) "opacity:0.3;" else ""
       raw_align <- if (!is.null(cell$align) && !is.na(cell$align)) cell$align else
                    if (ci == 1L) "left" else "center"
@@ -212,10 +231,8 @@ build_html_selection <- function(combined,
         " style=\"%s%spadding:0;text-align:%s\"",
         border_style, opacity, raw_align
       )
-      dc       <- as.character(phys_col)
-      phys_col <- phys_col + 1L
       cells[ci] <- sprintf(
-        "<td%s data-col='%s'>%s</td>", style, dc, htmlEscape(cell$text)
+        "<td%s%s data-col='%s'>%s</td>", span_attr, style, dc, htmlEscape(cell$text)
       )
     }
 

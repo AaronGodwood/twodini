@@ -448,7 +448,20 @@ server <- function(input, output, session) {
 
   observeEvent(input$remove_row, {
     df <- config_data()
-    if (nrow(df) > 1) config_data(df[-nrow(df), , drop = FALSE])
+    if (nrow(df) > 1) {
+      removed <- nrow(df)
+      config_data(df[-removed, , drop = FALSE])
+      # Drop the removed row's selections so a later Add Row doesn't inherit them
+      sels <- table_selections()
+      if (!is.null(sels[[as.character(removed)]])) {
+        sels[[as.character(removed)]] <- NULL
+        table_selections(sels)
+      }
+      if (identical(current_row_index(), removed)) {
+        current_row_index(NULL)
+        current_table_name(NULL)
+      }
+    }
   })
 
   observeEvent(input$clear_all, {
@@ -1215,11 +1228,21 @@ server <- function(input, output, session) {
       req(input$word_file)
 
       config <- config_data()
-      config <- config[config$Bookmark != "" & config$Table != "", ]
+      keep   <- which(nzchar(trimws(config$Bookmark)) & nzchar(trimws(config$Table)))
+      config <- config[keep, , drop = FALSE]
 
       if (nrow(config) == 0L) {
         showNotification("No table mappings defined", type = "error"); return()
       }
+
+      # Selections are keyed by original grid row index; re-key them to match
+      # the filtered config so blank rows above don't shift them onto the
+      # wrong tables.
+      all_sels <- table_selections()
+      selections <- setNames(
+        lapply(keep, function(i) all_sels[[as.character(i)]]),
+        as.character(seq_along(keep))
+      )
 
       n_rows <- nrow(config)
       status <- tryCatch(
@@ -1231,7 +1254,7 @@ server <- function(input, output, session) {
               word_path   = input$word_file$datapath,
               config      = config,
               rtf_paths   = rtf_paths(),
-              selections  = table_selections(),
+              selections  = selections,
               output_path = file,
               progress_cb = function(i, n, msg) {
                 incProgress(1 / n, detail = msg)
@@ -1244,6 +1267,9 @@ server <- function(input, output, session) {
           NULL
         }
       )
+      # process_document keys status by filtered row position; map back to
+      # original grid rows so the log pairs errors with the right rows
+      if (!is.null(status)) names(status) <- as.character(keep)
       last_gen_status(status)
     }
   )
