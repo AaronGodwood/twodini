@@ -1,8 +1,8 @@
 Package: houdini
-Title: Programatically add data tables and figures to report word documents
+Title: Programmatically Add Data Tables and Figures to Report Word Documents
 Version: 0.2.0
 Authors@R:
-    person("First", "Last", email = "first.last@example.com",
+    person("Aaron", "Godwood", email = "azmclaz@gmail.com",
            role = c("aut", "cre"))
 Description: A Shiny application for inserting tables and images
     at named bookmarks in a Word document template. Supports parameter and
@@ -18,11 +18,13 @@ Imports:
     base64enc,
     zip,
     readxl,
-    rstudioapi,
     writexl
 Suggests:
     knitr,
-    rmarkdown
+    rmarkdown,
+    rstudioapi,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
 VignetteBuilder: knitr
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

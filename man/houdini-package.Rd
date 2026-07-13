@@ -4,11 +4,11 @@
 \name{houdini-package}
 \alias{houdini}
 \alias{houdini-package}
-\title{houdini: Programatically add data tables and figures to report word documents}
+\title{houdini: Programmatically Add Data Tables and Figures to Report Word Documents}
 \description{
 A Shiny application for inserting tables and images at named bookmarks in a Word document template. Supports parameter and timeline filtering, interactive column/row exclusion, and produces a fully-formatted Word document with injected OOXML tables.
 }
 \author{
-\strong{Maintainer}: First Last \email{first.last@example.com}
+\strong{Maintainer}: Aaron Godwood \email{azmclaz@gmail.com}
 
 }

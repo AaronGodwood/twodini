@@ -170,7 +170,12 @@ build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
     xml_data_row(data_rows[[i]], is_last_data = (i == length(data_rows)))
   }), collapse = "")
 
-  sprintf("<w:tbl>%s%s%s%s</w:tbl>", tbl_pr, tbl_grid, hdr_xml, dat_xml)
+  # Declare the w: namespace on the fragment so it parses standalone
+  # (inject_table feeds it to xml2::read_xml before splicing it in)
+  sprintf(
+    "<w:tbl xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">%s%s%s%s</w:tbl>",
+    tbl_pr, tbl_grid, hdr_xml, dat_xml
+  )
 }
 
 # PUBLIC FUNCTION (called from app.R / docx.R)

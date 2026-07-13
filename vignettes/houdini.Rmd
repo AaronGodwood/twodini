@@ -1,0 +1,149 @@
+---
+title: "Getting started with houdini"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with houdini}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+houdini injects SAS-style RTF tables and figures into a Word (`.docx`) template
+at named bookmarks. The primary interface is a Shiny app, but the underlying
+pipeline is a set of plain R functions. This vignette walks through both: first
+the interactive workflow, then the pipeline the app is built on, using a small
+self-contained RTF so the examples run anywhere.
+
+## The interactive workflow
+
+Launch the app with:
+
+```{r, eval = FALSE}
+library(houdini)
+run_app()
+```
+
+The app has three inputs on the left:
+
+1. **Word Document** — a `.docx` template containing named bookmarks. houdini
+   reports how many bookmarks it finds. Bookmarks whose names begin with `_`
+   (Word's internal bookmarks) are ignored.
+2. **RTF Source** — a folder of `.rtf` files, one per table or figure. The file
+   name (without extension) becomes the *table name* you map bookmarks to.
+3. **Generate** — produces the finished document and a generation log.
+
+In the middle, the **Table Configuration** grid maps each bookmark to a table.
+Clicking a row loads that table into the preview on the right, where you can
+filter by parameter/timeline and click columns or rows to exclude them.
+
+For large jobs, define the mapping in a spreadsheet and use **Import Excel**
+instead of filling the grid by hand — see `?houdini_app` and the README for the
+column format.
+
+## The pipeline, step by step
+
+The app is a thin layer over a handful of pipeline functions. To see them work
+without needing a real Word file, we build a tiny two-page RTF by hand. This is
+the same shape SAS ODS emits: a repeating header row, a `Parameter:` line in the
+page header, and timeline-label rows (`Week 1`, `Week 4`) separating blocks of
+data.
+
+```{r}
+rtf <- r"(
+{\rtf1\ansi
+\sectd
+{\header \trowd\cellx9999{Parameter: Cholesterol\cell}\row}
+\trowd\trhdr\cellx1440\cellx2520\cellx3600
+{\b Treatment\cell}{\b N\cell}{\b Mean\cell}\row
+\trowd\cellx1440\cellx2520\cellx3600
+{Week 1\cell}{\cell}{\cell}\row
+\trowd\cellx1440\cellx2520\cellx3600
+{Placebo\cell}{50\cell}{5.2\cell}\row
+\trowd\cellx1440\cellx2520\cellx3600
+{Drug A\cell}{48\cell}{4.8\cell}\row
+\sect
+\sectd
+{\header \trowd\cellx9999{Parameter: Triglycerides\cell}\row}
+\trowd\trhdr\cellx1440\cellx2520\cellx3600
+{\b Treatment\cell}{\b N\cell}{\b Mean\cell}\row
+\trowd\cellx1440\cellx2520\cellx3600
+{Week 4\cell}{\cell}{\cell}\row
+\trowd\cellx1440\cellx2520\cellx3600
+{Placebo\cell}{49\cell}{5.5\cell}\row
+\sect
+}
+)"
+
+path <- tempfile(fileext = ".rtf")
+writeLines(rtf, path)
+```
+
+### Inspecting a table
+
+`houdini:::get_table_info()` summarises a table the way the app does when you
+click a configuration row — its shape, and the parameter and timeline values
+available to filter on:
+
+```{r}
+info <- houdini:::get_table_info(path)
+str(info)
+```
+
+The two `Parameter:` header lines surface as filterable parameters, and the
+`Week 1` / `Week 4` label rows surface as timelines.
+
+### Rendering a preview
+
+The preview panes are HTML. `get_table_html()` renders the whole table; the
+filtered variant applies exclusions and filters exactly as the download will:
+
+```{r}
+html <- houdini:::get_table_html(path)
+substr(html, 1, 200)
+```
+
+```{r}
+# Keep only the Cholesterol page, drop the third column
+html_filtered <- houdini:::get_table_html_output(
+  path,
+  parameters    = "Cholesterol",
+  excluded_cols = 3
+)
+grepl("Triglycerides", html_filtered)  # dropped
+```
+
+### Producing the Word table XML
+
+`get_table_xml()` is what actually goes into the document — a self-contained
+`<w:tbl>` OOXML fragment:
+
+```{r}
+xml <- houdini:::get_table_xml(path, parameters = "Cholesterol")
+# It parses as valid XML
+!is.null(xml2::read_xml(xml))
+```
+
+### Injecting into a document
+
+The final step needs a real `.docx` template with a matching bookmark, so it is
+not run here, but the shape is:
+
+```{r, eval = FALSE}
+session <- houdini:::open_docx("template.docx")
+houdini:::inject_table(session, "MyBookmark", xml)
+houdini:::close_docx(session, "output.docx")
+```
+
+`process_document()` wraps all of this — parse, filter, render, inject — over a
+whole configuration table, which is exactly what the **Generate** button calls.
+
+## Where to go next
+
+- `?run_app` / `?houdini_app` — the app entry points.
+- The README — installation and the Excel configuration format.

@@ -284,7 +284,9 @@ server <- function(input, output, session) {
   }
 
   # Show native folder picker button only when inside RStudio Desktop
+  # (rstudioapi is in Suggests, so check it is installed before calling it)
   output$folder_picker_btn <- renderUI({
+    if (!requireNamespace("rstudioapi", quietly = TRUE)) return(NULL)
     if (!isTRUE(tryCatch(rstudioapi::isAvailable(), error = function(e) FALSE))) return(NULL)
     actionButton("pick_folder_rstudio", "Choose RTF Folder\u2026",
                  class = "btn-primary",

@@ -1,6 +1,9 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
-^tests$
 ^LICENSE\.md$
 ^README\.md$
 ^\.github$
+^tests/test_.*\.R$
+^tests/make_.*\.R$
+^tests/benchmark\.R$
+^tests/rtf_snapshot\.csv$
