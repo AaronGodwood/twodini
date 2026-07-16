@@ -19,7 +19,7 @@ get_table_html_output(
 
 \item{excluded_cols}{Integer vector of 1-based column indices to remove}
 
-\item{excluded_rows}{Integer vector of 1-based data row indices to remove}
+\item{excluded_rows}{Integer vector of stable data-row IDs to remove}
 
 \item{excluded_header_rows}{Integer vector of 1-based header row indices}
 

@@ -20,10 +20,10 @@ test_that("filter_timelines keeps only the selected blocks", {
 
   kept <- filter_timelines(pages, "Week 4")
   # Page 1 holds Week 1 and Week 4; only the Week 4 block (label + 2 rows) stays
-  expect_length(kept[[1]]$data_rows, 3L)
-  expect_identical(kept[[1]]$data_rows[[1]]$cells[[1]]$text, "Week 4")
+  expect_identical(block_nrow(kept[[1]]$data), 3L)
+  expect_identical(kept[[1]]$data$text[1L, 1L], "Week 4")
   # Page 2 (Week 8 / Week 12) loses everything
-  expect_length(kept[[2]]$data_rows, 0L)
+  expect_identical(block_nrow(kept[[2]]$data), 0L)
 
   # No filter -> unchanged
   expect_identical(filter_timelines(pages, NULL), pages)
@@ -50,43 +50,42 @@ test_that("merged timeline label rows are detected and filterable", {
   expect_identical(sort(get_timelines(pages)), c("Week 1", "Week 2"))
 
   kept <- filter_timelines(pages, "Week 2")
-  expect_length(kept[[1]]$data_rows, 2L)
-  expect_identical(kept[[1]]$data_rows[[1]]$cells[[1]]$text, "Week 2")
+  expect_identical(block_nrow(kept[[1]]$data), 2L)
+  expect_identical(kept[[1]]$data$text[1L, 1L], "Week 2")
 })
 
 test_that("combine_pages concatenates data and keeps first-page headers", {
   pages <- parse_rtf(test_path("fixtures", "02_multi_param.rtf"))
   combined <- combine_pages(pages)
 
-  expect_length(combined$header_rows, 1L)
-  expect_length(combined$data_rows, 6L)  # 3 pages x 2 rows
+  expect_identical(block_nrow(combined$header), 1L)
+  expect_identical(block_nrow(combined$data), 6L)  # 3 pages x 2 rows
   expect_identical(combined$col_widths_twips, c(2160, 1440, 1440, 1440))
 
   empty <- combine_pages(list())
-  expect_length(empty$header_rows, 0L)
-  expect_length(empty$data_rows, 0L)
+  expect_identical(block_nrow(empty$header), 0L)
+  expect_identical(block_nrow(empty$data), 0L)
 })
 
 test_that("resolve_cols handles indices, names and out-of-range input", {
   pages    <- parse_rtf(test_path("fixtures", "01_simple.rtf"))
   combined <- combine_pages(pages)
-  hdrs     <- combined$header_rows
+  hdr      <- combined$header
 
-  expect_identical(resolve_cols(NULL, 4L, hdrs), 1:4)
-  expect_identical(resolve_cols(c(1L, 3L), 4L, hdrs), c(1L, 3L))
-  expect_identical(resolve_cols(c("N", "SD"), 4L, hdrs), c(2L, 4L))
+  expect_identical(resolve_cols(NULL, 4L, hdr), 1:4)
+  expect_identical(resolve_cols(c(1L, 3L), 4L, hdr), c(1L, 3L))
+  expect_identical(resolve_cols(c("N", "SD"), 4L, hdr), c(2L, 4L))
   # Out-of-range indices are dropped
-  expect_identical(resolve_cols(c(2L, 99L), 4L, hdrs), 2L)
+  expect_identical(resolve_cols(c(2L, 99L), 4L, hdr), 2L)
   # Nothing valid -> all columns
-  expect_identical(resolve_cols(99L, 4L, hdrs), 1:4)
+  expect_identical(resolve_cols(99L, 4L, hdr), 1:4)
 })
 
-test_that("slice_rows respects bounds", {
-  rows <- as.list(1:5)
-  expect_identical(slice_rows(rows, 2, 4), as.list(2:4))
-  expect_identical(slice_rows(rows, NULL, NULL), rows)
-  expect_identical(slice_rows(rows, 4, 2), list())
-  expect_identical(slice_rows(list(), 1, 10), list())
+test_that("slice_range respects bounds", {
+  expect_identical(slice_range(5L, 2, 4), 2:4)
+  expect_identical(slice_range(5L, NULL, NULL), 1:5)
+  expect_identical(slice_range(5L, 4, 2), integer())
+  expect_identical(slice_range(0L, 1, 10), integer())
 })
 
 test_that("prepare_table applies exclusions", {
@@ -96,6 +95,34 @@ test_that("prepare_table applies exclusions", {
     excluded_rows = c(1L, 3L)
   )
   expect_identical(prep$included_cols, c(1L, 3L, 4L))
-  expect_length(prep$combined$data_rows, 1L)
-  expect_identical(prep$combined$data_rows[[1]]$cells[[1]]$text, "Treatment A")
+  expect_identical(block_nrow(prep$combined$data), 1L)
+  expect_identical(prep$combined$data$text[1L, 1L], "Treatment A")
+})
+
+test_that("row exclusions are stable identities, not view positions", {
+  pages <- parse_rtf(test_path("fixtures", "03_multi_timeline.rtf"))
+
+  # IDs are sequential across pages in document order
+  combined <- combine_pages(pages)
+  expect_identical(combined$data$row_id,
+                   seq_len(block_nrow(combined$data)))
+
+  # Excluding the Week-4 Placebo row (ID 5) removes that same row even when
+  # a timeline filter changes which rows are visible
+  prep <- prepare_table(pages = pages, excluded_rows = 5L, timelines = "Week 4")
+  expect_identical(prep$combined$data$text[, 3L], c("", "175.2"))  # label + Treatment A
+
+  # An exclusion pointing at a row the filter already hides must not spill
+  # over onto a different visible row
+  prep2 <- prepare_table(pages = pages, excluded_rows = 2L, timelines = "Week 4")
+  expect_identical(block_nrow(prep2$combined$data), 3L)
+
+  # The selection pane emits the stable IDs so the app round-trips them
+  html <- get_table_html_selection(
+    test_path("fixtures", "03_multi_timeline.rtf"),
+    timelines = "Week 4", pages = pages
+  )
+  expect_match(html, "data-row=\"4\" data-rowtype=\"data\"", fixed = TRUE)
+  expect_match(html, "data-row=\"6\" data-rowtype=\"data\"", fixed = TRUE)
+  expect_no_match(html, "data-row=\"1\" data-rowtype=\"data\"", fixed = TRUE)
 })

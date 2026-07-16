@@ -21,7 +21,9 @@ prepare_table(
 
 \item{excluded_cols}{Integer vector of column indices to exclude}
 
-\item{excluded_rows}{Integer vector of data row indices to exclude}
+\item{excluded_rows}{Integer vector of stable data-row IDs to exclude
+(as assigned by \code{parse_rtf}; equal to the row's position in the
+unfiltered combined table)}
 
 \item{excluded_header_rows}{Integer vector of header row indices to exclude}
 

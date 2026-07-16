@@ -19,7 +19,7 @@ get_table_html_selection(
 
 \item{excluded_cols}{Integer vector of 1-based column indices to grey out}
 
-\item{excluded_rows}{Integer vector of 1-based data row indices to grey out}
+\item{excluded_rows}{Integer vector of stable data-row IDs to grey out}
 
 \item{excluded_header_rows}{Integer vector of 1-based header row indices}
 

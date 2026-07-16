@@ -98,11 +98,11 @@ run_rtf_tests <- function(rtf_folder = "../test_data/rtf",
 
     check(
       sprintf("%s: has header rows", fname),
-      length(combined$header_rows) >= 1L
+      block_nrow(combined$header) >= 1L
     )
     check(
       sprintf("%s: has data rows", fname),
-      length(combined$data_rows) >= 1L
+      block_nrow(combined$data) >= 1L
     )
     check(
       sprintf("%s: has column widths", fname),
@@ -111,10 +111,10 @@ run_rtf_tests <- function(rtf_folder = "../test_data/rtf",
 
     # Check every cell for artifacts
     artifact_found <- FALSE
-    check_cells <- function(rows, row_type) {
-      for (ri in seq_along(rows)) {
-        for (ci in seq_along(rows[[ri]]$cells)) {
-          cell_text <- rows[[ri]]$cells[[ci]]$text
+    check_cells <- function(b, row_type) {
+      for (ri in seq_len(block_nrow(b))) {
+        for (ci in which(b$present[ri, ])) {
+          cell_text <- b$text[ri, ci]
           if (has_artifacts(cell_text)) {
             if (!artifact_found) {
               message(sprintf("  [FAIL] %s: artifact in %s row %d col %d: '%s'",
@@ -125,14 +125,14 @@ run_rtf_tests <- function(rtf_folder = "../test_data/rtf",
         }
       }
     }
-    check_cells(combined$header_rows, "header")
-    check_cells(combined$data_rows, "data")
+    check_cells(combined$header, "header")
+    check_cells(combined$data, "data")
     check(sprintf("%s: no artifacts in cell text", fname), !artifact_found)
 
     # Collect snapshot data
-    collect_row <- function(rows, row_type) {
-      for (ri in seq_along(rows)) {
-        vals <- vapply(rows[[ri]]$cells, function(c) c$text, character(1))
+    collect_row <- function(b, row_type) {
+      for (ri in seq_len(block_nrow(b))) {
+        vals <- b$text[ri, b$present[ri, ]]
         all_rows[[length(all_rows) + 1L]] <<- data.frame(
           file     = fname,
           row_type = row_type,
@@ -142,8 +142,8 @@ run_rtf_tests <- function(rtf_folder = "../test_data/rtf",
         )
       }
     }
-    collect_row(combined$header_rows, "header")
-    collect_row(combined$data_rows, "data")
+    collect_row(combined$header, "header")
+    collect_row(combined$data, "data")
 
     # Validate HTML generation
     html <- tryCatch(get_table_html(f), error = function(e) NULL)

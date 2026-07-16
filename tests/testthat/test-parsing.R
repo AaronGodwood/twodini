@@ -7,20 +7,15 @@ test_that("simple fixture parses to the expected structure", {
 
   page <- pages[[1]]
   expect_identical(page$parameter, "Cholesterol")
-  expect_length(page$header_rows, 1L)
-  expect_length(page$data_rows, 3L)
+  expect_identical(block_nrow(page$header), 1L)
+  expect_identical(block_nrow(page$data), 3L)
 
-  hdr <- page$header_rows[[1]]
-  expect_true(hdr$is_header)
-  expect_identical(
-    vapply(hdr$cells, `[[`, character(1), "text"),
-    c("Treatment Group", "N", "Mean", "SD")
-  )
-  expect_identical(
-    vapply(hdr$cells, `[[`, numeric(1), "width_twips"),
-    c(2160, 1440, 1440, 1440)
-  )
-  expect_identical(page$data_rows[[1]]$cells[[1]]$text, "Placebo")
+  expect_true(all(page$header$is_header))
+  expect_identical(page$header$text[1L, ],
+                   c("Treatment Group", "N", "Mean", "SD"))
+  expect_identical(page$header$width[1L, ],
+                   c(2160L, 1440L, 1440L, 1440L))
+  expect_identical(page$data$text[1L, 1L], "Placebo")
 })
 
 test_that("multi-parameter fixture exposes one parameter per page", {
@@ -38,28 +33,26 @@ test_that("timeline labels are detected across pages", {
 
 test_that("merged header cells get colspans and copied text", {
   pages <- parse_rtf(test_path("fixtures", "05_merged_headers.rtf"))
-  hdrs <- pages[[1]]$header_rows
-  expect_length(hdrs, 2L)
+  hdrs <- pages[[1]]$header
+  expect_identical(block_nrow(hdrs), 2L)
 
-  top <- hdrs[[1]]$cells
-  expect_identical(vapply(top, `[[`, integer(1), "colspan"),
-                   c(1L, 2L, 0L, 2L, 0L))
+  expect_identical(hdrs$colspan[1L, ], c(1L, 2L, 0L, 2L, 0L))
   # Continuation cells carry the merge-first text
-  expect_identical(top[[3]]$text, "Dose A")
-  expect_identical(top[[5]]$text, "Dose B")
+  expect_identical(hdrs$text[1L, 3L], "Dose A")
+  expect_identical(hdrs$text[1L, 5L], "Dose B")
 })
 
 test_that("escape fixture decodes CP1252 and unicode in cells", {
   pages <- parse_rtf(test_path("fixtures", "07_escapes.rtf"))
-  hdr  <- pages[[1]]$header_rows[[1]]$cells
-  rows <- pages[[1]]$data_rows
+  hdr  <- pages[[1]]$header
+  dat  <- pages[[1]]$data
 
-  expect_identical(hdr[[2]]$text, "Mean ± SD")
-  expect_identical(hdr[[3]]$text, "“Range”")
-  expect_identical(rows[[1]]$cells[[1]]$text, "≤ 5 years")
-  expect_identical(rows[[1]]$cells[[3]]$text, "120–190")
+  expect_identical(hdr$text[1L, 2L], "Mean ± SD")
+  expect_identical(hdr$text[1L, 3L], "“Range”")
+  expect_identical(dat$text[1L, 1L], "≤ 5 years")
+  expect_identical(dat$text[1L, 3L], "120–190")
   # \uc0 consumes the delimiter space and skips no fallback
-  expect_identical(rows[[2]]$cells[[1]]$text, "Δfrom baseline")
+  expect_identical(dat$text[2L, 1L], "Δfrom baseline")
 })
 
 test_that("whole-file CP1252 bytes are converted on read", {
@@ -73,8 +66,7 @@ test_that("whole-file CP1252 bytes are converted on read", {
   writeBin(raw_1252, path)
 
   pages <- parse_rtf(path)
-  expect_identical(pages[[1]]$header_rows[[1]]$cells[[1]]$text,
-                   "M“q”")
+  expect_identical(pages[[1]]$header$text[1L, 1L], "M“q”")
 })
 
 test_that("parsed cells contain no RTF artifacts", {
@@ -85,13 +77,14 @@ test_that("parsed cells contain no RTF artifacts", {
   for (f in fixtures) {
     pages <- parse_rtf(f)
     for (page in pages) {
-      for (row in c(page$header_rows, page$data_rows)) {
-        for (cell in row$cells) {
+      for (b in list(page$header, page$data)) {
+        texts <- b$text[b$present]
+        for (txt in texts) {
           expect_false(
-            grepl("[�□]", cell$text, perl = TRUE) ||
-              grepl("\\\\[a-zA-Z]{2,}", cell$text, perl = TRUE),
+            grepl("[�□]", txt, perl = TRUE) ||
+              grepl("\\\\[a-zA-Z]{2,}", txt, perl = TRUE),
             label = sprintf("artifact-free cell in %s ('%s')",
-                            basename(f), cell$text)
+                            basename(f), txt)
           )
         }
       }

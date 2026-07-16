@@ -1,4 +1,4 @@
-# xml.R - structured table data -> minimal Word XML (OOXML / w: namespace)
+# xml.R - structured table data (blocks) -> minimal Word XML (OOXML / w: namespace)
 
 # HELPERS
 
@@ -29,74 +29,71 @@ run_pr_xml <- function(bold = FALSE) {
   )
 }
 
+# Build a single <w:tc> cell
+xml_cell <- function(text, align, grid_span, borders, run_pr) {
+  tc_pr <- sprintf(
+    "<w:tcPr>%s%s<w:jc w:val=\"%s\"/></w:tcPr>",
+    grid_span, borders, align
+  )
+  para_pr <- sprintf(
+    "<w:pPr><w:jc w:val=\"%s\"/><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>",
+    align
+  )
+  run  <- sprintf("<w:r>%s<w:t xml:space=\"preserve\">%s</w:t></w:r>",
+                  run_pr, xml_escape(text))
+  para <- sprintf("<w:p>%s%s</w:p>", para_pr, run)
+  sprintf("<w:tc>%s%s</w:tc>", tc_pr, para)
+}
+
 # ROW BUILDERS
 
-# Build a <w:tr> for a header row
+# Build a <w:tr> for row `r` of a header block
 # is_last_header: add bottom border to cells
-xml_header_row <- function(row, is_last_header) {
+xml_header_row <- function(b, r, is_last_header) {
   run_pr <- run_pr_xml(bold = TRUE)
+  k <- block_ncol(b)
+  cells <- character(k)
+  for (ci in seq_len(k)) {
+    if (!b$present[r, ci]) next
+    span <- b$colspan[r, ci]
+    if (span == 0L) next                        # continuation, omit
 
-  cells <- lapply(seq_along(row$cells), function(ci) {
-    cell <- row$cells[[ci]]
-    if (isTRUE(cell$colspan == 0L)) return("")  # continuation, omit
-
-    grid_span <- if (!is.null(cell$colspan) && cell$colspan > 1L) {
-      sprintf("<w:gridSpan w:val=\"%d\"/>", cell$colspan)
+    grid_span <- if (span > 1L) {
+      sprintf("<w:gridSpan w:val=\"%d\"/>", span)
     } else ""
 
     # Last header row: always border. Upper rows: border only if cell has text.
-    has_text <- nchar(trimws(cell$text)) > 0L
+    has_text <- nzchar(trimws(b$text[r, ci]))
     sides    <- if (is_last_header || has_text) "bottom" else character()
     borders  <- cell_borders_xml(sides)
 
-    align <- if (!is.na(cell$align)) cell$align else if (ci == 1L) "left" else "center"
-
-    tc_pr <- sprintf(
-      "<w:tcPr>%s%s<w:jc w:val=\"%s\"/></w:tcPr>",
-      grid_span, borders, align
-    )
-
-    para_pr <- sprintf(
-      "<w:pPr><w:jc w:val=\"%s\"/><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>",
-      align
-    )
-    run  <- sprintf("<w:r>%s<w:t xml:space=\"preserve\">%s</w:t></w:r>", run_pr, xml_escape(cell$text))
-    para <- sprintf("<w:p>%s%s</w:p>", para_pr, run)
-
-    sprintf("<w:tc>%s%s</w:tc>", tc_pr, para)
-  })
+    align <- cell_align_or_default(b$align[r, ci], ci)
+    cells[ci] <- xml_cell(b$text[r, ci], align, grid_span, borders, run_pr)
+  }
 
   tr_pr <- "<w:trPr><w:tblHeader/></w:trPr>"
   sprintf("<w:tr>%s%s</w:tr>", tr_pr, paste(cells, collapse = ""))
 }
 
-# Build a <w:tr> for a data row
-# col_index: 1-based index of each cell (for alignment: 1 = left, rest = centre)
+# Build a <w:tr> for row `r` of a data block
 # is_last_data: add bottom border to cells
-xml_data_row <- function(row, is_last_data) {
+xml_data_row <- function(b, r, is_last_data) {
   borders <- cell_borders_xml(if (is_last_data) "bottom" else character())
   run_pr  <- run_pr_xml(bold = FALSE)
+  k <- block_ncol(b)
+  cells <- character(k)
+  for (ci in seq_len(k)) {
+    if (!b$present[r, ci]) next
+    span <- b$colspan[r, ci]
+    if (span == 0L) next                        # merge continuation, omit
 
-  cells <- lapply(seq_along(row$cells), function(ci) {
-    cell  <- row$cells[[ci]]
-    if (isTRUE(cell$colspan == 0L)) return("")  # merge continuation, omit
-
-    grid_span <- if (!is.null(cell$colspan) && cell$colspan > 1L) {
-      sprintf("<w:gridSpan w:val=\"%d\"/>", cell$colspan)
+    grid_span <- if (span > 1L) {
+      sprintf("<w:gridSpan w:val=\"%d\"/>", span)
     } else ""
 
-    align <- if (!is.na(cell$align)) cell$align else if (ci == 1L) "left" else "center"
-
-    tc_pr   <- sprintf("<w:tcPr>%s%s<w:jc w:val=\"%s\"/></w:tcPr>", grid_span, borders, align)
-    para_pr <- sprintf(
-      "<w:pPr><w:jc w:val=\"%s\"/><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>",
-      align
-    )
-    run     <- sprintf("<w:r>%s<w:t xml:space=\"preserve\">%s</w:t></w:r>", run_pr, xml_escape(cell$text))
-    para    <- sprintf("<w:p>%s%s</w:p>", para_pr, run)
-
-    sprintf("<w:tc>%s%s</w:tc>", tc_pr, para)
-  })
+    align <- cell_align_or_default(b$align[r, ci], ci)
+    cells[ci] <- xml_cell(b$text[r, ci], align, grid_span, borders, run_pr)
+  }
 
   sprintf("<w:tr>%s</w:tr>", paste(cells, collapse = ""))
 }
@@ -109,25 +106,21 @@ xml_data_row <- function(row, is_last_data) {
 # text_width_twips: if supplied, scale column widths proportionally to this total
 build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
                       text_width_twips = NULL) {
-  header_rows      <- combined$header_rows
-  data_rows        <- combined$data_rows
+  header           <- combined$header
+  data             <- combined$data
   col_widths_twips <- combined$col_widths_twips
 
   n_cols_total <- length(col_widths_twips)
-  if (n_cols_total == 0L && length(header_rows) > 0L) {
-    n_cols_total <- length(header_rows[[1]]$cells)
+  if (n_cols_total == 0L && block_nrow(header) > 0L) {
+    n_cols_total <- sum(header$present[1L, ])
   }
 
-  cols      <- resolve_cols(cols, n_cols_total, header_rows)
-  data_rows <- slice_rows(data_rows, row_start, row_end)
+  cols <- resolve_cols(cols, n_cols_total, header)
+  data <- block_rows(data, slice_range(block_nrow(data), row_start, row_end))
 
-  # Filter cells to selected columns
-  filter_cells <- function(row) {
-    row$cells <- row$cells[cols]
-    row
-  }
-  header_rows <- lapply(header_rows, filter_cells)
-  data_rows   <- lapply(data_rows,   filter_cells)
+  # Filter to selected columns
+  header <- block_cols(header, cols)
+  data   <- block_cols(data, cols)
 
   # Column widths for the selected columns
   selected_widths <- col_widths_twips[cols]
@@ -136,7 +129,7 @@ build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
   # Scale proportionally to fill text_width_twips, preserving column ratios.
   # If no target width supplied (or source total is zero), use widths as-is.
   if (!is.null(text_width_twips) && total_width > 0L) {
-    scale          <- text_width_twips / total_width
+    scale           <- text_width_twips / total_width
     selected_widths <- pmax(1L, round(selected_widths * scale))
     # Absorb any rounding remainder into the widest column
     diff <- text_width_twips - sum(selected_widths)
@@ -161,14 +154,16 @@ build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
   )
 
   # Header rows
-  hdr_xml <- paste(lapply(seq_along(header_rows), function(i) {
-    xml_header_row(header_rows[[i]], is_last_header = (i == length(header_rows)))
-  }), collapse = "")
+  n_hdr <- block_nrow(header)
+  hdr_xml <- paste(vapply(seq_len(n_hdr), function(i) {
+    xml_header_row(header, i, is_last_header = (i == n_hdr))
+  }, character(1)), collapse = "")
 
   # Data rows
-  dat_xml <- paste(lapply(seq_along(data_rows), function(i) {
-    xml_data_row(data_rows[[i]], is_last_data = (i == length(data_rows)))
-  }), collapse = "")
+  n_dat <- block_nrow(data)
+  dat_xml <- paste(vapply(seq_len(n_dat), function(i) {
+    xml_data_row(data, i, is_last_data = (i == n_dat))
+  }, character(1)), collapse = "")
 
   # Declare the w: namespace on the fragment so it parses standalone
   # (inject_table feeds it to xml2::read_xml before splicing it in)
@@ -184,7 +179,7 @@ build_xml <- function(combined, cols = NULL, row_start = NULL, row_end = NULL,
 #'
 #' @param path Path to the .rtf file
 #' @param excluded_cols Integer vector of 1-based column indices to exclude (NULL = none)
-#' @param excluded_rows Integer vector of 1-based data row indices to exclude (NULL = none)
+#' @param excluded_rows Integer vector of stable data-row IDs to exclude (NULL = none)
 #' @param excluded_header_rows Integer vector of 1-based header row indices to exclude
 #' @param parameters Character vector of parameter values to keep (NULL = all)
 #' @param timelines Character vector of timeline labels to keep (NULL = all)

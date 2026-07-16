@@ -4,14 +4,14 @@
 \alias{resolve_cols}
 \title{Resolve column specification to integer indices}
 \usage{
-resolve_cols(cols, n_cols_total, header_rows)
+resolve_cols(cols, n_cols_total, header)
 }
 \arguments{
 \item{cols}{Column spec (NULL, integer vector, or character names)}
 
 \item{n_cols_total}{Total number of columns}
 
-\item{header_rows}{Header rows (for name matching)}
+\item{header}{Header block (for name matching)}
 }
 \value{
 Integer vector of valid 1-based column indices

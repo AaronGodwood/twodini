@@ -20,7 +20,7 @@ get_table_xml(
 
 \item{excluded_cols}{Integer vector of 1-based column indices to exclude (NULL = none)}
 
-\item{excluded_rows}{Integer vector of 1-based data row indices to exclude (NULL = none)}
+\item{excluded_rows}{Integer vector of stable data-row IDs to exclude (NULL = none)}
 
 \item{excluded_header_rows}{Integer vector of 1-based header row indices to exclude}
 

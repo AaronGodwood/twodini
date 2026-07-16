@@ -10,7 +10,7 @@ combine_pages(pages)
 \item{pages}{Filtered list of page objects}
 }
 \value{
-list(header_rows, data_rows, col_widths_twips)
+list(header, data, col_widths_twips) where header/data are blocks
 }
 \description{
 Header rows are taken from the first page only.

@@ -21,13 +21,13 @@ test_that("full local RTF corpus parses without artifacts", {
     expect_gte(length(pages), 1L)
 
     combined <- combine_pages(pages)
-    for (row in c(combined$header_rows, combined$data_rows)) {
-      for (cell in row$cells) {
+    for (b in list(combined$header, combined$data)) {
+      for (txt in b$text[b$present]) {
         expect_false(
-          grepl("[�□]", cell$text, perl = TRUE) ||
-            grepl("\\\\[a-zA-Z]{2,}", cell$text, perl = TRUE),
+          grepl("[�□]", txt, perl = TRUE) ||
+            grepl("\\\\[a-zA-Z]{2,}", txt, perl = TRUE),
           label = sprintf("artifact-free cell in %s ('%s')",
-                          basename(f), cell$text)
+                          basename(f), txt)
         )
       }
     }

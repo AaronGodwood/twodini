@@ -743,24 +743,7 @@ server <- function(input, output, session) {
             table_info_cache(cache)
           } else {
             info <- tryCatch({
-              pages <- get_cached_pages(tbl_name)
-              combined <- combine_pages(pages)
-              ref_row <- if (length(combined$header_rows) > 0L) {
-                combined$header_rows[[1]]
-              } else if (length(combined$data_rows) > 0L) {
-                combined$data_rows[[1]]
-              } else NULL
-              n_cols <- if (!is.null(ref_row)) length(ref_row$cells) else 0L
-              col_names <- if (!is.null(ref_row)) {
-                vapply(ref_row$cells, function(cell) cell$text, character(1))
-              } else character()
-              list(
-                n_cols     = n_cols,
-                n_rows     = length(combined$data_rows),
-                col_names  = col_names,
-                parameters = get_parameters(pages),
-                timelines  = get_timelines(pages)
-              )
+              table_info_from_pages(get_cached_pages(tbl_name))
             }, error = function(e) {
               showNotification(paste("Error reading RTF:", conditionMessage(e)), type = "error")
               NULL

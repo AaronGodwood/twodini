@@ -213,7 +213,89 @@ remove_group <- function(text, tag) {
   text
 }
 
-# 4. TABLE PARSING
+# 4. TABLE BLOCKS
+#
+# A "block" is a rectangular set of table rows stored column-wise as matrices
+# (one row per table row), rather than nested lists of per-cell objects:
+#   text    - character (n x k), "" where a row has no cell in that column
+#   align   - character (n x k), NA where the cell declares no alignment
+#   colspan - integer   (n x k), 1 normal, >1 merge head, 0 merge continuation
+#   width   - integer   (n x k), cell width in twips
+#   present - logical   (n x k), FALSE where row r has no cell in column c
+#   is_header - logical(n)
+#   row_id    - integer(n), stable identity assigned by parse_rtf (NA before)
+# Filtering and combining reduce to matrix subsetting, and a large document
+# is a handful of big vectors instead of millions of tiny list objects.
+
+block_new <- function() {
+  m_chr <- matrix(character(), 0L, 0L)
+  m_int <- matrix(integer(),   0L, 0L)
+  list(
+    text = m_chr, align = m_chr, colspan = m_int, width = m_int,
+    present = matrix(logical(), 0L, 0L),
+    is_header = logical(), row_id = integer()
+  )
+}
+
+block_nrow <- function(b) length(b$is_header)
+block_ncol <- function(b) ncol(b$text)
+
+# Subset a block to the given rows (logical or integer index)
+block_rows <- function(b, idx) {
+  b$text      <- b$text[idx, , drop = FALSE]
+  b$align     <- b$align[idx, , drop = FALSE]
+  b$colspan   <- b$colspan[idx, , drop = FALSE]
+  b$width     <- b$width[idx, , drop = FALSE]
+  b$present   <- b$present[idx, , drop = FALSE]
+  b$is_header <- b$is_header[idx]
+  b$row_id    <- b$row_id[idx]
+  b
+}
+
+# Widen a block to at least k columns, filling with "absent cell" values
+block_pad <- function(b, k) {
+  extra <- k - block_ncol(b)
+  if (extra <= 0L) return(b)
+  n <- block_nrow(b)
+  b$text    <- cbind(b$text,    matrix("",            n, extra))
+  b$align   <- cbind(b$align,   matrix(NA_character_, n, extra))
+  b$colspan <- cbind(b$colspan, matrix(0L,            n, extra))
+  b$width   <- cbind(b$width,   matrix(0L,            n, extra))
+  b$present <- cbind(b$present, matrix(FALSE,         n, extra))
+  b
+}
+
+# Subset a block to the given column indices (row fields unchanged)
+block_cols <- function(b, cols) {
+  if (block_nrow(b) == 0L) return(b)
+  b <- block_pad(b, max(cols, 0L))
+  b$text    <- b$text[, cols, drop = FALSE]
+  b$align   <- b$align[, cols, drop = FALSE]
+  b$colspan <- b$colspan[, cols, drop = FALSE]
+  b$width   <- b$width[, cols, drop = FALSE]
+  b$present <- b$present[, cols, drop = FALSE]
+  b
+}
+
+# Stack blocks vertically, padding narrower blocks with absent cells
+block_rbind_all <- function(blocks) {
+  blocks <- blocks[vapply(blocks, block_nrow, integer(1)) > 0L]
+  if (length(blocks) == 0L) return(block_new())
+  if (length(blocks) == 1L) return(blocks[[1L]])
+  k <- max(vapply(blocks, block_ncol, integer(1)))
+  blocks <- lapply(blocks, block_pad, k = k)
+  list(
+    text      = do.call(rbind, lapply(blocks, `[[`, "text")),
+    align     = do.call(rbind, lapply(blocks, `[[`, "align")),
+    colspan   = do.call(rbind, lapply(blocks, `[[`, "colspan")),
+    width     = do.call(rbind, lapply(blocks, `[[`, "width")),
+    present   = do.call(rbind, lapply(blocks, `[[`, "present")),
+    is_header = unlist(lapply(blocks, `[[`, "is_header"), use.names = FALSE),
+    row_id    = unlist(lapply(blocks, `[[`, "row_id"),    use.names = FALSE)
+  )
+}
+
+# 4b. TABLE PARSING
 
 # findInterval re-validates `vec` on every call (anyNA + is.unsorted + an
 # as.double copy) - O(length(vec)) work that turns per-row lookups over large
@@ -246,18 +328,17 @@ any_within <- function(pos, lo, hi) {
 }
 
 # Given RTF text for one section (header or body), parse all rows.
-# Returns a list of row objects:
-#   list(is_header, cells = list(list(text, width_twips, colspan)))
+# Returns a block (see section 4).
 #
 # Each token type is located with a single regex scan over the whole section;
 # per-row and per-cell tests then become sorted-position lookups instead of
 # fresh regex passes over row substrings.
 parse_rtf_table <- function(section_text) {
   trowd_pos <- token_positions(section_text, "\\\\trowd(?![a-zA-Z])")
-  if (length(trowd_pos) == 0L) return(list())
+  if (length(trowd_pos) == 0L) return(block_new())
 
   row_pos <- token_positions(section_text, "\\\\row(?![a-zA-Z])")
-  if (length(row_pos) == 0L) return(list())
+  if (length(row_pos) == 0L) return(block_new())
 
   trhdr_pos    <- token_positions(section_text, "\\\\trhdr(?![a-zA-Z])")
   clmgf_pos    <- token_positions(section_text, "\\\\clmgf(?![a-zA-Z])")
@@ -280,8 +361,13 @@ parse_rtf_table <- function(section_text) {
                                   regmatches(section_text, cellx_m)[[1]]))
   }
 
-  rows <- vector("list", length(trowd_pos))
-  nr   <- 0L
+  n_max      <- length(trowd_pos)
+  row_texts  <- vector("list", n_max)
+  row_aligns <- vector("list", n_max)
+  row_spans  <- vector("list", n_max)
+  row_widths <- vector("list", n_max)
+  row_hdr    <- logical(n_max)
+  nr         <- 0L
 
   for (ti in seq_along(trowd_pos)) {
     row_start <- trowd_pos[ti]
@@ -368,13 +454,15 @@ parse_rtf_table <- function(section_text) {
     }
 
     # --- clean cell text ---
-    cells <- vector("list", n_cells_content)
+    texts <- vapply(cell_chunks, rtf_cell_to_text, character(1),
+                    USE.NAMES = FALSE)
+
+    # Alignment from RTF control words within each cell chunk
+    aligns <- rep(NA_character_, n_cells_content)
     for (ci in seq_len(n_cells_content)) {
       cs <- chunk_starts[ci]
       ce <- chunk_ends[ci]
-
-      # Alignment from RTF control words within the cell chunk
-      cell_align <- if (any_within(ql_pos, cs, ce)) {
+      aligns[ci] <- if (any_within(ql_pos, cs, ce)) {
         "left"
       } else if (any_within(qr_pos, cs, ce)) {
         "right"
@@ -383,15 +471,12 @@ parse_rtf_table <- function(section_text) {
       } else {
         NA_character_
       }
-
-      cells[[ci]] <- list(
-        text           = rtf_cell_to_text(cell_chunks[ci]),
-        width_twips    = if (ci <= n_cells_def) widths[ci] else 0L,
-        align          = cell_align,
-        is_merge_first = flag_first[ci],
-        is_merge_cont  = flag_cont[ci]
-      )
     }
+
+    # Cell widths (0 for content cells beyond the defined \cellx boundaries)
+    cell_widths <- integer(n_cells_content)
+    nfill <- min(n_cells_content, n_cells_def)
+    if (nfill > 0L) cell_widths[seq_len(nfill)] <- widths[seq_len(nfill)]
 
     if (any(flag_first) || any(flag_cont)) {
       # --- resolve merged cells: repeat first-cell text into continuations ---
@@ -399,45 +484,67 @@ parse_rtf_table <- function(section_text) {
         last_first_text <- ""
         for (ci in seq_len(n_cells_content)) {
           if (flag_first[ci]) {
-            last_first_text <- cells[[ci]]$text
+            last_first_text <- texts[ci]
           } else if (flag_cont[ci]) {
-            cells[[ci]]$text <- last_first_text
+            texts[ci] <- last_first_text
           }
         }
       }
 
       # --- compute colspan for each cell ---
-      # A merged group: is_merge_first followed by N is_merge_cont cells -> colspan = N+1
+      # A merged group: merge head followed by N continuations -> colspan N+1;
+      # continuations get colspan 0 (skipped in output)
+      spans <- integer(n_cells_content)
       ci <- 1L
       while (ci <= n_cells_content) {
         if (flag_first[ci]) {
-          span <- 1L
           j <- ci + 1L
-          while (j <= n_cells_content && flag_cont[j]) {
-            span <- span + 1L
-            j <- j + 1L
-          }
-          cells[[ci]]$colspan <- span
-          # Mark continuation cells with colspan 0 (to be skipped in output)
-          for (k in seq(ci + 1L, length.out = span - 1L)) {
-            if (k <= n_cells_content) cells[[k]]$colspan <- 0L
-          }
+          while (j <= n_cells_content && flag_cont[j]) j <- j + 1L
+          spans[ci] <- j - ci
           ci <- j
         } else {
-          cells[[ci]]$colspan <- 1L
+          spans[ci] <- 1L
           ci <- ci + 1L
         }
       }
     } else {
       # No merges in this row: every cell spans one column
-      for (ci in seq_len(n_cells_content)) cells[[ci]]$colspan <- 1L
+      spans <- rep(1L, n_cells_content)
     }
 
     nr <- nr + 1L
-    rows[[nr]] <- list(is_header = is_hdr, cells = cells)
+    row_texts[[nr]]  <- texts
+    row_aligns[[nr]] <- aligns
+    row_spans[[nr]]  <- spans
+    row_widths[[nr]] <- cell_widths
+    row_hdr[nr]      <- is_hdr
   }
 
-  rows[seq_len(nr)]
+  # --- assemble the block matrices ---
+  k <- if (nr > 0L) max(lengths(row_texts[seq_len(nr)])) else 0L
+  text    <- matrix("",            nr, k)
+  align   <- matrix(NA_character_, nr, k)
+  colspan <- matrix(0L,            nr, k)
+  width   <- matrix(0L,            nr, k)
+  present <- matrix(FALSE,         nr, k)
+  for (i in seq_len(nr)) {
+    m <- length(row_texts[[i]])
+    if (m > 0L) {
+      idx <- seq_len(m)
+      text[i, idx]    <- row_texts[[i]]
+      align[i, idx]   <- row_aligns[[i]]
+      colspan[i, idx] <- row_spans[[i]]
+      width[i, idx]   <- row_widths[[i]]
+      present[i, idx] <- TRUE
+    }
+  }
+
+  list(
+    text = text, align = align, colspan = colspan, width = width,
+    present = present,
+    is_header = row_hdr[seq_len(nr)],
+    row_id    = rep(NA_integer_, nr)
+  )
 }
 
 # Strip RTF markup from a cell's raw text, returning clean plain text
@@ -484,41 +591,34 @@ rtf_cell_to_text <- function(raw) {
 parse_page <- function(page_text) {
   # Extract header and footer groups, then body is what remains
   header_text <- extract_group(page_text, "\\header")
-  footer_text <- extract_group(page_text, "\\footer")  # not used currently
 
   body_text <- remove_groups(page_text, c(
     "\\header", "\\footer", "\\headerf", "\\footerf",
     "\\headerl", "\\headerr", "\\footerl", "\\footerr"
   ))
 
-  # Parse header table rows
-  header_rows <- if (!is.na(header_text)) parse_rtf_table(header_text) else list()
+  # Parse the page-header table and pull the parameter from its lowest row
+  header_tbl <- if (!is.na(header_text)) {
+    parse_rtf_table(header_text)
+  } else {
+    block_new()
+  }
+  parameter <- extract_parameter(header_tbl)
 
-  # Extract parameter from lowest header row
-  parameter <- extract_parameter(header_rows)
-
-  # Parse body table rows
-  body_rows <- parse_rtf_table(body_text)
-
-  # Split body rows into header rows (is_header=TRUE) and data rows
-  is_hdr <- vapply(body_rows, `[[`, logical(1), "is_header")
+  # Parse the body table and split into header rows and data rows
+  body <- parse_rtf_table(body_text)
   list(
-    parameter   = parameter,
-    header_rows = body_rows[is_hdr],
-    data_rows   = body_rows[!is_hdr]
+    parameter = parameter,
+    header    = block_rows(body, body$is_header),
+    data      = block_rows(body, !body$is_header)
   )
 }
 
 # Extract "Parameter: <value>" from the lowest row of the RTF header section
-extract_parameter <- function(header_rows) {
-  if (length(header_rows) == 0L) return(NA_character_)
-
-  # Check rows from bottom up
-  for (i in rev(seq_along(header_rows))) {
-    row <- header_rows[[i]]
-    for (cell in row$cells) {
-      m <- regmatches(cell$text,
-                      regexpr("(?i)^Parameter:\\s*(.+)$", cell$text, perl = TRUE))
+extract_parameter <- function(header_tbl) {
+  for (i in rev(seq_len(block_nrow(header_tbl)))) {
+    for (txt in header_tbl$text[i, header_tbl$present[i, ]]) {
+      m <- regmatches(txt, regexpr("(?i)^Parameter:\\s*(.+)$", txt, perl = TRUE))
       if (length(m) > 0L && nchar(m) > 0L) {
         return(trimws(sub("(?i)^Parameter:\\s*", "", m, perl = TRUE)))
       }
@@ -534,13 +634,26 @@ extract_parameter <- function(header_rows) {
 #' @param path Path to the .rtf file
 #' @return List of page objects, each with:
 #'   \item{parameter}{character or NA}
-#'   \item{header_rows}{list of row objects}
-#'   \item{data_rows}{list of row objects}
-#'   Each row object: list(is_header, cells = list(list(text, width_twips, colspan, ...)))
+#'   \item{header}{block of header rows (see section 4)}
+#'   \item{data}{block of data rows, with stable \code{row_id}s}
 parse_rtf <- function(path) {
   text  <- rtf_read_raw(path)
   pages <- rtf_split_pages(text)
-  lapply(pages, parse_page)
+  pages <- lapply(pages, parse_page)
+
+  # Stable row identity: number data rows sequentially across all pages in
+  # document order. Row exclusions are stored against these IDs rather than
+  # view positions, so an exclusion keeps pointing at the same row when
+  # parameter/timeline filters change the set of visible rows.
+  next_id <- 1L
+  for (pi in seq_along(pages)) {
+    n <- block_nrow(pages[[pi]]$data)
+    if (n > 0L) {
+      pages[[pi]]$data$row_id <- seq.int(next_id, length.out = n)
+      next_id <- next_id + n
+    }
+  }
+  pages
 }
 
 # 7. FILTERING
@@ -565,26 +678,36 @@ filter_pages <- function(pages, parameters) {
 #' @param pages Output of parse_rtf()
 #' @return Character vector of unique timeline labels
 get_timelines <- function(pages) {
-  labels <- vector("list", length(pages))
-  for (pi in seq_along(pages)) {
-    page_labels <- character()
-    for (row in pages[[pi]]$data_rows) {
-      if (length(row$cells) == 0L) next
-      col1 <- trimws(row$cells[[1]]$text)
-      if (nchar(col1) == 0L) next
-      rest_empty <- all(vapply(row$cells[-1], cell_effectively_empty, logical(1)))
-      if (rest_empty) page_labels <- c(page_labels, col1)
-    }
-    labels[[pi]] <- page_labels
-  }
+  labels <- lapply(pages, function(page) {
+    lab <- timeline_label_info(page$data)
+    lab$col1[lab$is_label_shape]
+  })
   unique(unlist(labels, use.names = FALSE))
 }
 
-# A cell counts as empty for timeline-label detection if it has no text OR is
-# a merge continuation (parse_rtf_table copies the first cell's text into
-# continuations, so a label merged across the row would otherwise never match)
-cell_effectively_empty <- function(cell) {
-  isTRUE(cell$colspan == 0L) || nchar(trimws(cell$text)) == 0L
+# Shared timeline-label-row detection over a data block. A cell counts as
+# empty if it has no text OR is a merge continuation (parse_rtf_table copies
+# the head cell's text into continuations, so a label merged across the row
+# would otherwise never match). Returns:
+#   col1           - trimmed text of each row's first cell ("" if absent)
+#   is_label_shape - non-empty col1 with all remaining cells empty
+timeline_label_info <- function(b) {
+  n <- block_nrow(b)
+  k <- block_ncol(b)
+  if (n == 0L || k == 0L) {
+    return(list(col1 = character(n), is_label_shape = logical(n)))
+  }
+  col1 <- trimws(b$text[, 1L])
+  col1[!b$present[, 1L]] <- ""
+  rest_empty <- if (k > 1L) {
+    nonempty <- b$present[, -1L, drop = FALSE] &
+      b$colspan[, -1L, drop = FALSE] != 0L &
+      matrix(nzchar(trimws(b$text[, -1L, drop = FALSE])), nrow = n)
+    rowSums(nonempty) == 0L
+  } else {
+    rep(TRUE, n)
+  }
+  list(col1 = col1, is_label_shape = nzchar(col1) & rest_empty)
 }
 
 #' Get all unique parameter values across pages (excluding NA)
@@ -610,26 +733,21 @@ filter_timelines <- function(pages, timelines) {
   if (length(all_labels) == 0L) return(pages)
 
   lapply(pages, function(page) {
+    n <- block_nrow(page$data)
+    if (n == 0L) return(page)
+
+    lab <- timeline_label_info(page$data)
+    is_label <- lab$is_label_shape & lab$col1 %in% all_labels
+
     current_timeline <- NA_character_
-    kept <- logical(length(page$data_rows))
-
-    for (i in seq_along(page$data_rows)) {
-      row  <- page$data_rows[[i]]
-      col1 <- if (length(row$cells) > 0L) trimws(row$cells[[1]]$text) else ""
-
-      # Check if this row is a timeline label row
-      rest_empty <- length(row$cells) <= 1L ||
-        all(vapply(row$cells[-1], cell_effectively_empty, logical(1)))
-
-      if (nchar(col1) > 0L && rest_empty && col1 %in% all_labels) {
-        current_timeline <- col1
-      }
-
-      # Keep if: no timeline context yet, or current timeline is in the include list
+    kept <- logical(n)
+    for (i in seq_len(n)) {
+      if (is_label[i]) current_timeline <- lab$col1[i]
+      # Keep if: no timeline context yet, or current timeline is included
       kept[i] <- is.na(current_timeline) || current_timeline %in% timelines
     }
 
-    page$data_rows <- page$data_rows[kept]
+    page$data <- block_rows(page$data, kept)
     page
   })
 }
@@ -641,26 +759,27 @@ filter_timelines <- function(pages, timelines) {
 #' Header rows are taken from the first page only.
 #' Data rows are concatenated across all pages.
 #' @param pages Filtered list of page objects
-#' @return list(header_rows, data_rows, col_widths_twips)
+#' @return list(header, data, col_widths_twips) where header/data are blocks
 combine_pages <- function(pages) {
   if (length(pages) == 0L) {
-    return(list(header_rows = list(), data_rows = list(), col_widths_twips = numeric()))
+    return(list(header = block_new(), data = block_new(),
+                col_widths_twips = numeric()))
   }
 
-  header_rows <- pages[[1]]$header_rows
-  data_rows   <- unlist(lapply(pages, `[[`, "data_rows"), recursive = FALSE)
+  header <- pages[[1]]$header
+  data   <- block_rbind_all(lapply(pages, `[[`, "data"))
 
-  # Column widths from first page's first data (or header) row
-  ref_rows <- if (length(header_rows) > 0L) header_rows else data_rows
-  col_widths_twips <- if (length(ref_rows) > 0L) {
-    vapply(ref_rows[[1]]$cells, `[[`, numeric(1), "width_twips")
+  # Column widths from the first header (or data) row
+  ref <- if (block_nrow(header) > 0L) header else data
+  col_widths_twips <- if (block_nrow(ref) > 0L) {
+    as.numeric(ref$width[1L, ref$present[1L, ]])
   } else {
     numeric()
   }
 
   list(
-    header_rows      = header_rows,
-    data_rows        = data_rows,
+    header           = header,
+    data             = data,
     col_widths_twips = col_widths_twips
   )
 }
@@ -672,27 +791,34 @@ combine_pages <- function(pages) {
 #' @param path Path to the .rtf file
 #' @return list(n_cols, n_rows, col_names, parameters, timelines)
 get_table_info <- function(path) {
-  pages <- parse_rtf(path)
+  table_info_from_pages(parse_rtf(path))
+}
+
+#' Get summary info from already-parsed pages (used by app.R's cache)
+#'
+#' @param pages Output of parse_rtf()
+#' @return list(n_cols, n_rows, col_names, parameters, timelines)
+table_info_from_pages <- function(pages) {
   combined <- combine_pages(pages)
 
-  ref_row <- if (length(combined$header_rows) > 0L) {
-    combined$header_rows[[1]]
-  } else if (length(combined$data_rows) > 0L) {
-    combined$data_rows[[1]]
+  ref <- if (block_nrow(combined$header) > 0L) {
+    combined$header
+  } else if (block_nrow(combined$data) > 0L) {
+    combined$data
   } else {
     NULL
   }
 
-  n_cols    <- if (!is.null(ref_row)) length(ref_row$cells) else 0L
-  col_names <- if (!is.null(ref_row)) {
-    vapply(ref_row$cells, function(cell) cell$text, character(1))
+  n_cols    <- if (!is.null(ref)) sum(ref$present[1L, ]) else 0L
+  col_names <- if (!is.null(ref)) {
+    ref$text[1L, ref$present[1L, ]]
   } else {
     character()
   }
 
   list(
     n_cols     = n_cols,
-    n_rows     = length(combined$data_rows),
+    n_rows     = block_nrow(combined$data),
     col_names  = col_names,
     parameters = get_parameters(pages),
     timelines  = get_timelines(pages)
@@ -706,15 +832,15 @@ get_table_info <- function(path) {
 #' Handles NULL (all), integer vector, or character names matched against headers.
 #' @param cols Column spec (NULL, integer vector, or character names)
 #' @param n_cols_total Total number of columns
-#' @param header_rows Header rows (for name matching)
+#' @param header Header block (for name matching)
 #' @return Integer vector of valid 1-based column indices
-resolve_cols <- function(cols, n_cols_total, header_rows) {
+resolve_cols <- function(cols, n_cols_total, header) {
   if (is.null(cols) || length(cols) == 0L) return(seq_len(n_cols_total))
 
   cols_int <- suppressWarnings(as.integer(cols))
   if (anyNA(cols_int)) {
-    ref_names <- if (length(header_rows) > 0L) {
-      vapply(header_rows[[1]]$cells, function(c) c$text, character(1))
+    ref_names <- if (block_nrow(header) > 0L) {
+      header$text[1L, header$present[1L, ]]
     } else character()
     cols_int <- match(as.character(cols), ref_names)
     cols_int <- cols_int[!is.na(cols_int)]
@@ -723,18 +849,17 @@ resolve_cols <- function(cols, n_cols_total, header_rows) {
   if (length(cols_int) == 0L) seq_len(n_cols_total) else cols_int
 }
 
-#' Slice data rows by start/end range
+#' Resolve a start/end row range to integer indices
 #'
-#' @param data_rows List of row objects
+#' @param n Number of rows available
 #' @param row_start 1-based start (NULL = 1)
 #' @param row_end 1-based end (NULL = last)
-#' @return Sliced list of row objects
-slice_rows <- function(data_rows, row_start = NULL, row_end = NULL) {
-  n <- length(data_rows)
-  if (n == 0L) return(list())
+#' @return Integer vector of row indices (possibly empty)
+slice_range <- function(n, row_start = NULL, row_end = NULL) {
+  if (n == 0L) return(integer())
   rs <- if (is.null(row_start)) 1L else max(1L, as.integer(row_start))
   re <- if (is.null(row_end))   n   else min(n, as.integer(row_end))
-  if (rs <= re) data_rows[seq(rs, re)] else list()
+  if (rs <= re) seq.int(rs, re) else integer()
 }
 
 #' Prepare a combined table with filtering and exclusions applied
@@ -743,7 +868,9 @@ slice_rows <- function(data_rows, row_start = NULL, row_end = NULL) {
 #' @param pages Pre-parsed pages (from parse_rtf) or NULL
 #' @param path RTF file path (used only if pages is NULL)
 #' @param excluded_cols Integer vector of column indices to exclude
-#' @param excluded_rows Integer vector of data row indices to exclude
+#' @param excluded_rows Integer vector of stable data-row IDs to exclude
+#'   (as assigned by \code{parse_rtf}; equal to the row's position in the
+#'   unfiltered combined table)
 #' @param excluded_header_rows Integer vector of header row indices to exclude
 #' @param parameters Parameter filter
 #' @param timelines Timeline filter
@@ -758,15 +885,20 @@ prepare_table <- function(pages = NULL, path = NULL,
   combined <- combine_pages(pages)
 
   n_cols <- length(combined$col_widths_twips)
-  n_data <- length(combined$data_rows)
-  n_hdr  <- length(combined$header_rows)
+  n_data <- block_nrow(combined$data)
+  n_hdr  <- block_nrow(combined$header)
 
   inc_cols <- setdiff(seq_len(n_cols), excluded_cols        %||% integer())
-  inc_rows <- setdiff(seq_len(n_data), excluded_rows        %||% integer())
   inc_hdrs <- setdiff(seq_len(n_hdr),  excluded_header_rows %||% integer())
 
-  combined$data_rows   <- combined$data_rows[inc_rows]
-  combined$header_rows <- combined$header_rows[inc_hdrs]
+  # Data rows are dropped by stable row ID, not by position in the (possibly
+  # filtered) view; rows without an ID fall back to their current position
+  row_ids <- combined$data$row_id
+  row_ids[is.na(row_ids)] <- seq_len(n_data)[is.na(row_ids)]
+  keep_rows <- !(row_ids %in% (excluded_rows %||% integer()))
+
+  combined$data   <- block_rows(combined$data, keep_rows)
+  combined$header <- block_rows(combined$header, inc_hdrs)
 
   list(combined = combined, included_cols = inc_cols)
 }

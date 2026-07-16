@@ -1,4 +1,4 @@
-# html.R - structured table data -> minimal HTML
+# html.R - structured table data (blocks) -> minimal HTML
 
 # HELPERS
 
@@ -12,41 +12,48 @@ htmlEscape <- function(text) {
 # Convert twips to px (96 dpi: 1 inch = 1440 twips = 96 px => 1 twip = 96/1440)
 twips_to_px <- function(twips) round(twips * 96 / 1440)
 
-# Build a single <tr> string for a header row
+# Resolve declared alignment with the positional fallback:
+# column 1 is a label (left), the rest are data (center)
+cell_align_or_default <- function(align, ci) {
+  if (!is.na(align)) align else if (ci == 1L) "left" else "center"
+}
+
+# Build a single <tr> string for row `r` of a header block
 # is_last_header: whether to add bottom border to cells
-html_header_row <- function(row, is_last_header) {
-  cells <- vapply(seq_along(row$cells), function(ci) {
-    cell <- row$cells[[ci]]
-    if (isTRUE(cell$colspan == 0L)) return("")   # continuation cell, skip
-    span_attr <- if (!is.null(cell$colspan) && cell$colspan > 1L) {
-      sprintf(" colspan=\"%d\"", cell$colspan)
-    } else ""
-    has_text <- nchar(trimws(cell$text)) > 0L
+html_header_row <- function(b, r, is_last_header) {
+  k <- block_ncol(b)
+  cells <- character(k)
+  for (ci in seq_len(k)) {
+    if (!b$present[r, ci]) next
+    span <- b$colspan[r, ci]
+    if (span == 0L) next                        # continuation cell, skip
+    span_attr <- if (span > 1L) sprintf(" colspan=\"%d\"", span) else ""
+    has_text <- nzchar(trimws(b$text[r, ci]))
     border   <- if (is_last_header || has_text) "border-bottom:2px solid black;" else ""
-    raw_align <- if (!is.null(cell$align) && !is.na(cell$align)) cell$align else if (ci == 1L) "left" else "center"
-    align    <- paste0("text-align:", raw_align)
+    align    <- paste0("text-align:", cell_align_or_default(b$align[r, ci], ci))
     style    <- sprintf(" style=\"%spadding:0;%s\"", border, align)
-    sprintf("<th%s%s><b>%s</b></th>", span_attr, style, htmlEscape(cell$text))
-  }, character(1))
+    cells[ci] <- sprintf("<th%s%s><b>%s</b></th>",
+                         span_attr, style, htmlEscape(b$text[r, ci]))
+  }
   paste0("<tr>", paste(cells, collapse = ""), "</tr>")
 }
 
-# Build a single <tr> string for a data row
-# n_cols: total columns (for alignment: col 1 left, rest centre)
+# Build a single <tr> string for row `r` of a data block
 # is_last_data: whether to add bottom border to cells
-html_data_row <- function(row, n_cols, is_last_data) {
+html_data_row <- function(b, r, is_last_data) {
   border_style <- if (is_last_data) "border-bottom:2px solid black;" else ""
-  cells <- lapply(seq_along(row$cells), function(ci) {
-    cell <- row$cells[[ci]]
-    if (isTRUE(cell$colspan == 0L)) return("")   # merge continuation, skip
-    span_attr <- if (!is.null(cell$colspan) && cell$colspan > 1L) {
-      sprintf(" colspan=\"%d\"", cell$colspan)
-    } else ""
-    raw_align <- if (!is.null(cell$align) && !is.na(cell$align)) cell$align else if (ci == 1L) "left" else "center"
-    align <- paste0("text-align:", raw_align)
+  k <- block_ncol(b)
+  cells <- character(k)
+  for (ci in seq_len(k)) {
+    if (!b$present[r, ci]) next
+    span <- b$colspan[r, ci]
+    if (span == 0L) next                        # merge continuation, skip
+    span_attr <- if (span > 1L) sprintf(" colspan=\"%d\"", span) else ""
+    align <- paste0("text-align:", cell_align_or_default(b$align[r, ci], ci))
     style <- trimws(paste0(border_style, "padding:0;", align), which = "left")
-    sprintf("<td%s style=\"%s\">%s</td>", span_attr, style, htmlEscape(cell$text))
-  })
+    cells[ci] <- sprintf("<td%s style=\"%s\">%s</td>",
+                         span_attr, style, htmlEscape(b$text[r, ci]))
+  }
   paste0("<tr>", paste(cells, collapse = ""), "</tr>")
 }
 
@@ -56,26 +63,21 @@ html_data_row <- function(row, n_cols, is_last_data) {
 # cols: integer vector of column indices to include (NULL = all)
 # row_start / row_end: 1-based data row range (NULL = all)
 build_html <- function(combined, cols = NULL, row_start = NULL, row_end = NULL) {
-  header_rows      <- combined$header_rows
-  data_rows        <- combined$data_rows
+  header           <- combined$header
+  data             <- combined$data
   col_widths_twips <- combined$col_widths_twips
 
   n_cols_total <- length(col_widths_twips)
-  if (n_cols_total == 0L && length(header_rows) > 0L) {
-    n_cols_total <- length(header_rows[[1]]$cells)
+  if (n_cols_total == 0L && block_nrow(header) > 0L) {
+    n_cols_total <- sum(header$present[1L, ])
   }
 
-  cols      <- resolve_cols(cols, n_cols_total, header_rows)
-  data_rows <- slice_rows(data_rows, row_start, row_end)
+  cols <- resolve_cols(cols, n_cols_total, header)
+  data <- block_rows(data, slice_range(block_nrow(data), row_start, row_end))
 
-  # Helper: filter cells in a row to selected cols
-  filter_cells <- function(row) {
-    row$cells <- row$cells[cols]
-    row
-  }
-
-  header_rows <- lapply(header_rows, filter_cells)
-  data_rows   <- lapply(data_rows,   filter_cells)
+  # Filter to selected columns
+  header <- block_cols(header, cols)
+  data   <- block_cols(data, cols)
 
   n_cols <- length(cols)
 
@@ -85,27 +87,28 @@ build_html <- function(combined, cols = NULL, row_start = NULL, row_end = NULL) 
   colgroup  <- sprintf("<colgroup>%s</colgroup>", col_tags)
 
   # <thead>
-  thead_rows <- lapply(seq_along(header_rows), function(i) {
-    html_header_row(header_rows[[i]], is_last_header = (i == length(header_rows)))
-  })
+  n_hdr <- block_nrow(header)
+  thead_rows <- vapply(seq_len(n_hdr), function(i) {
+    html_header_row(header, i, is_last_header = (i == n_hdr))
+  }, character(1))
   thead <- sprintf("<thead>%s</thead>", paste(thead_rows, collapse = ""))
 
   # <tbody>
-  n_data_rows  <- length(data_rows)
-  row_limit    <- 200L
-  truncated    <- n_data_rows > row_limit
-  display_rows <- if (truncated) data_rows[seq_len(row_limit)] else data_rows
+  n_data_rows <- block_nrow(data)
+  row_limit   <- 200L
+  truncated   <- n_data_rows > row_limit
+  n_display   <- if (truncated) row_limit else n_data_rows
 
-  tbody_rows <- lapply(seq_along(display_rows), function(i) {
-    html_data_row(display_rows[[i]], n_cols, is_last_data = (!truncated && i == length(display_rows)))
-  })
+  tbody_rows <- vapply(seq_len(n_display), function(i) {
+    html_data_row(data, i, is_last_data = (!truncated && i == n_display))
+  }, character(1))
 
   if (truncated) {
     notice <- sprintf(
       "<tr><td colspan=\"%d\" style=\"padding:4px 0;text-align:center;font-style:italic;color:#888;border-top:1px solid #ccc;\">%d rows not shown - table truncated for preview</td></tr>",
       n_cols, n_data_rows - row_limit
     )
-    tbody_rows <- c(tbody_rows, list(notice))
+    tbody_rows <- c(tbody_rows, notice)
   }
 
   tbody <- sprintf("<tbody>%s</tbody>", paste(tbody_rows, collapse = ""))
@@ -121,19 +124,22 @@ build_html <- function(combined, cols = NULL, row_start = NULL, row_end = NULL) 
 
 # Build HTML for the interactive "selection" pane.
 # Adds data-col / data-row / data-rowtype attributes for JS click handling.
-# excluded_cols / excluded_rows / excluded_header_rows: integer vectors (1-based)
-# - matching elements are rendered at opacity 0.3.
+# Data rows carry their stable row ID in data-row (survives filter changes);
+# header rows are positional.
+# excluded_cols / excluded_header_rows: integer vectors (1-based positions);
+# excluded_rows: stable row IDs. Matching elements render at opacity 0.3.
 build_html_selection <- function(combined,
                                  excluded_cols        = integer(),
                                  excluded_rows        = integer(),
                                  excluded_header_rows = integer()) {
-  header_rows      <- combined$header_rows
-  data_rows        <- combined$data_rows
+  header           <- combined$header
+  data             <- combined$data
   col_widths_twips <- combined$col_widths_twips
 
   n_cols_total <- length(col_widths_twips)
-  if (n_cols_total == 0L && length(header_rows) > 0L)
-    n_cols_total <- length(header_rows[[1]]$cells)
+  if (n_cols_total == 0L && block_nrow(header) > 0L) {
+    n_cols_total <- sum(header$present[1L, ])
+  }
 
   if (is.null(excluded_cols))        excluded_cols        <- integer()
   if (is.null(excluded_rows))        excluded_rows        <- integer()
@@ -144,21 +150,20 @@ build_html_selection <- function(combined,
   colgroup  <- sprintf("<colgroup>%s</colgroup>", col_tags)
 
   # Header rows
-  thead_rows <- lapply(seq_along(header_rows), function(ri) {
-    row      <- header_rows[[ri]]
-    is_last  <- ri == length(header_rows)
+  n_hdr <- block_nrow(header)
+  k_hdr <- block_ncol(header)
+  thead_rows <- vapply(seq_len(n_hdr), function(ri) {
+    is_last  <- ri == n_hdr
     row_excl <- ri %in% excluded_header_rows
 
     phys_col <- 1L
-    cells <- character(length(row$cells))
-    for (ci in seq_along(row$cells)) {
-      cell <- row$cells[[ci]]
-      if (isTRUE(cell$colspan == 0L)) {
-        cells[ci] <- ""
-        next
-      }
-      span    <- if (!is.null(cell$colspan) && cell$colspan > 1L) cell$colspan else 1L
-      spanned <- seq(phys_col, phys_col + span - 1L)
+    cells <- character(k_hdr)
+    for (ci in seq_len(k_hdr)) {
+      if (!header$present[ri, ci]) next
+      span <- header$colspan[ri, ci]
+      if (span == 0L) next
+      if (span < 1L) span <- 1L
+      spanned  <- seq(phys_col, phys_col + span - 1L)
       col_excl <- any(spanned %in% excluded_cols)
 
       data_col_val <- if (span > 1L) {
@@ -169,10 +174,9 @@ build_html_selection <- function(combined,
       phys_col <- phys_col + span
 
       span_attr <- if (span > 1L) sprintf(" colspan=\"%d\"", span) else ""
-      has_text  <- nchar(trimws(cell$text)) > 0L
+      has_text  <- nzchar(trimws(header$text[ri, ci]))
       border    <- if (is_last || has_text) "border-bottom:2px solid black;" else ""
-      raw_align <- if (!is.null(cell$align) && !is.na(cell$align)) cell$align else
-                   if (ci == 1L) "left" else "center"
+      raw_align <- cell_align_or_default(header$align[ri, ci], ci)
       opacity   <- if (col_excl || row_excl) "opacity:0.3;" else ""
       style     <- sprintf(
         " style=\"%s%spadding:0;text-align:%s;cursor:pointer\"",
@@ -180,7 +184,7 @@ build_html_selection <- function(combined,
       )
       cells[ci] <- sprintf(
         "<th%s%s data-col='%s'><b>%s</b></th>",
-        span_attr, style, data_col_val, htmlEscape(cell$text)
+        span_attr, style, data_col_val, htmlEscape(header$text[ri, ci])
       )
     }
 
@@ -189,31 +193,33 @@ build_html_selection <- function(combined,
       "<tr data-row=\"%d\" data-rowtype=\"header\"%s>%s</tr>",
       ri, row_opacity, paste(cells, collapse = "")
     )
-  })
+  }, character(1))
   thead <- sprintf("<thead>%s</thead>", paste(thead_rows, collapse = ""))
 
   # Data rows
-  n_data_rows  <- length(data_rows)
-  row_limit    <- 200L
-  truncated    <- n_data_rows > row_limit
-  display_rows <- if (truncated) data_rows[seq_len(row_limit)] else data_rows
+  n_data_rows <- block_nrow(data)
+  k_dat       <- block_ncol(data)
+  row_limit   <- 200L
+  truncated   <- n_data_rows > row_limit
+  n_display   <- if (truncated) row_limit else n_data_rows
 
-  tbody_rows <- lapply(seq_along(display_rows), function(ri) {
-    row      <- display_rows[[ri]]
-    is_last  <- !truncated && ri == length(display_rows)
-    row_excl <- ri %in% excluded_rows
+  tbody_rows <- vapply(seq_len(n_display), function(ri) {
+    is_last <- !truncated && ri == n_display
+    # Data rows are identified by stable row ID (survives filter changes);
+    # rows without one fall back to their display position
+    rid      <- data$row_id[ri]
+    if (is.na(rid)) rid <- ri
+    row_excl <- rid %in% excluded_rows
     border_style <- if (is_last) "border-bottom:2px solid black;" else ""
 
     phys_col <- 1L
-    cells <- character(length(row$cells))
-    for (ci in seq_along(row$cells)) {
-      cell <- row$cells[[ci]]
-      if (isTRUE(cell$colspan == 0L)) {
-        cells[ci] <- ""                      # merge continuation, skip
-        next
-      }
-      span    <- if (!is.null(cell$colspan) && cell$colspan > 1L) cell$colspan else 1L
-      spanned <- seq(phys_col, phys_col + span - 1L)
+    cells <- character(k_dat)
+    for (ci in seq_len(k_dat)) {
+      if (!data$present[ri, ci]) next
+      span <- data$colspan[ri, ci]
+      if (span == 0L) next                     # merge continuation, skip
+      if (span < 1L) span <- 1L
+      spanned  <- seq(phys_col, phys_col + span - 1L)
       col_excl <- any(spanned %in% excluded_cols)
 
       dc <- if (span > 1L) {
@@ -224,15 +230,15 @@ build_html_selection <- function(combined,
       phys_col <- phys_col + span
 
       span_attr <- if (span > 1L) sprintf(" colspan=\"%d\"", span) else ""
-      opacity  <- if (col_excl || row_excl) "opacity:0.3;" else ""
-      raw_align <- if (!is.null(cell$align) && !is.na(cell$align)) cell$align else
-                   if (ci == 1L) "left" else "center"
+      opacity   <- if (col_excl || row_excl) "opacity:0.3;" else ""
+      raw_align <- cell_align_or_default(data$align[ri, ci], ci)
       style <- sprintf(
         " style=\"%s%spadding:0;text-align:%s\"",
         border_style, opacity, raw_align
       )
       cells[ci] <- sprintf(
-        "<td%s%s data-col='%s'>%s</td>", span_attr, style, dc, htmlEscape(cell$text)
+        "<td%s%s data-col='%s'>%s</td>",
+        span_attr, style, dc, htmlEscape(data$text[ri, ci])
       )
     }
 
@@ -242,16 +248,16 @@ build_html_selection <- function(combined,
     )
     sprintf(
       "<tr data-row=\"%d\" data-rowtype=\"data\"%s>%s</tr>",
-      ri, row_style, paste(cells, collapse = "")
+      rid, row_style, paste(cells, collapse = "")
     )
-  })
+  }, character(1))
 
   if (truncated) {
     notice <- sprintf(
       "<tr><td colspan=\"%d\" style=\"padding:4px 0;text-align:center;font-style:italic;color:#888;border-top:1px solid #ccc;\">%d rows not shown - table truncated for preview</td></tr>",
       n_cols_total, n_data_rows - row_limit
     )
-    tbody_rows <- c(tbody_rows, list(notice))
+    tbody_rows <- c(tbody_rows, notice)
   }
 
   tbody <- sprintf("<tbody>%s</tbody>", paste(tbody_rows, collapse = ""))
@@ -270,7 +276,7 @@ build_html_selection <- function(combined,
 #'
 #' @param path Path to the .rtf file
 #' @param excluded_cols Integer vector of 1-based column indices to grey out
-#' @param excluded_rows Integer vector of 1-based data row indices to grey out
+#' @param excluded_rows Integer vector of stable data-row IDs to grey out
 #' @param excluded_header_rows Integer vector of 1-based header row indices
 #' @param parameters Character vector of parameter values to keep (NULL = all)
 #' @param timelines Character vector of timeline labels to keep (NULL = all)
@@ -300,7 +306,7 @@ get_table_html_selection <- function(path,
 #'
 #' @param path Path to the .rtf file
 #' @param excluded_cols Integer vector of 1-based column indices to remove
-#' @param excluded_rows Integer vector of 1-based data row indices to remove
+#' @param excluded_rows Integer vector of stable data-row IDs to remove
 #' @param excluded_header_rows Integer vector of 1-based header row indices
 #' @param parameters Character vector of parameter values to keep (NULL = all)
 #' @param timelines Character vector of timeline labels to keep (NULL = all)

@@ -89,13 +89,21 @@ test_that("HTML output has table structure and escapes content", {
 })
 
 test_that("long tables are truncated in the HTML preview", {
-  mk_cell <- function(text) {
-    list(text = text, width_twips = 1000L, align = NA_character_, colspan = 1L)
+  mk_block <- function(texts, is_header) {
+    n <- length(texts)
+    list(
+      text      = matrix(texts, n, 1L),
+      align     = matrix(NA_character_, n, 1L),
+      colspan   = matrix(1L, n, 1L),
+      width     = matrix(1000L, n, 1L),
+      present   = matrix(TRUE, n, 1L),
+      is_header = rep(is_header, n),
+      row_id    = rep(NA_integer_, n)
+    )
   }
-  mk_row <- function(i) list(is_header = FALSE, cells = list(mk_cell(paste0("r", i))))
   combined <- list(
-    header_rows = list(list(is_header = TRUE, cells = list(mk_cell("H")))),
-    data_rows = lapply(seq_len(250L), mk_row),
+    header = mk_block("H", TRUE),
+    data   = mk_block(paste0("r", seq_len(250L)), FALSE),
     col_widths_twips = 1000
   )
   html <- build_html(combined)
