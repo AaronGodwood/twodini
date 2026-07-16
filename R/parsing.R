@@ -215,89 +215,154 @@ remove_group <- function(text, tag) {
 
 # 4. TABLE PARSING
 
+# findInterval re-validates `vec` on every call (anyNA + is.unsorted + an
+# as.double copy) - O(length(vec)) work that turns per-row lookups over large
+# sections quadratic. Positions here are always sorted doubles, so skip the
+# checks where this R version allows it (R >= 4.3).
+fint <- if (getRversion() >= "4.3.0") {
+  function(x, vec) findInterval(x, vec, checkSorted = FALSE, checkNA = FALSE)
+} else {
+  findInterval
+}
+
+# Start positions of all matches of `pattern`, ascending; numeric(0) if none.
+# Doubles, not integers, so fint() avoids a per-call as.double copy.
+token_positions <- function(text, pattern) {
+  p <- gregexpr(pattern, text, perl = TRUE)[[1]]
+  if (p[1L] == -1L) numeric() else as.double(p)
+}
+
+# Elements of the sorted position vector `pos` that fall within [lo, hi]
+pos_within <- function(pos, lo, hi) {
+  if (length(pos) == 0L) return(numeric())
+  i1 <- fint(lo - 1L, pos) + 1L
+  i2 <- fint(hi, pos)
+  if (i1 > i2) numeric() else pos[i1:i2]
+}
+
+# Does any element of the sorted position vector `pos` fall within [lo, hi]?
+any_within <- function(pos, lo, hi) {
+  length(pos) != 0L && fint(hi, pos) > fint(lo - 1L, pos)
+}
+
 # Given RTF text for one section (header or body), parse all rows.
 # Returns a list of row objects:
 #   list(is_header, cells = list(list(text, width_twips, colspan)))
+#
+# Each token type is located with a single regex scan over the whole section;
+# per-row and per-cell tests then become sorted-position lookups instead of
+# fresh regex passes over row substrings.
 parse_rtf_table <- function(section_text) {
-  rows <- list()
+  trowd_pos <- token_positions(section_text, "\\\\trowd(?![a-zA-Z])")
+  if (length(trowd_pos) == 0L) return(list())
 
-  # Tokenise: find each \trowd ... \row block
-  # We'll scan linearly through \trowd markers
-  trowd_positions <- gregexpr("\\\\trowd(?![a-zA-Z])", section_text, perl = TRUE)[[1]]
-  if (identical(trowd_positions, -1L)) return(rows)
+  row_pos <- token_positions(section_text, "\\\\row(?![a-zA-Z])")
+  if (length(row_pos) == 0L) return(list())
 
-  row_positions   <- gregexpr("\\\\row(?![a-zA-Z])",   section_text, perl = TRUE)[[1]]
-  if (identical(row_positions, -1L))   return(rows)
+  trhdr_pos    <- token_positions(section_text, "\\\\trhdr(?![a-zA-Z])")
+  clmgf_pos    <- token_positions(section_text, "\\\\clmgf(?![a-zA-Z])")
+  clmrg_pos    <- token_positions(section_text, "\\\\clmrg(?![a-zA-Z])")
+  cell_pos     <- token_positions(section_text, "\\\\cell(?![a-zA-Z])")
+  ql_pos       <- token_positions(section_text, "\\\\ql(?![a-zA-Z])")
+  qr_pos       <- token_positions(section_text, "\\\\qr(?![a-zA-Z])")
+  qc_pos       <- token_positions(section_text, "\\\\qc(?![a-zA-Z])")
+  bold_on_pos  <- token_positions(section_text, "\\\\b(?![a-zA-Z0-9])")
+  bold_off_pos <- token_positions(section_text, "\\\\b0(?![a-zA-Z])")
 
-  for (ti in seq_along(trowd_positions)) {
-    row_start <- trowd_positions[ti]
+  cellx_m   <- gregexpr("\\\\cellx([0-9]+)", section_text, perl = TRUE)
+  cellx_pos <- cellx_m[[1]]
+  if (cellx_pos[1L] == -1L) {
+    cellx_pos  <- numeric()
+    cellx_vals <- integer()
+  } else {
+    cellx_pos  <- as.double(cellx_pos)
+    cellx_vals <- as.integer(gsub("\\\\cellx", "",
+                                  regmatches(section_text, cellx_m)[[1]]))
+  }
 
-    # Find the matching \row that comes after this \trowd
-    row_end_candidates <- row_positions[row_positions > row_start]
-    if (length(row_end_candidates) == 0L) next
-    row_end <- row_end_candidates[1]
+  rows <- vector("list", length(trowd_pos))
+  nr   <- 0L
 
-    row_text <- substr(section_text, row_start, row_end + 3L)  # include \row
+  for (ti in seq_along(trowd_pos)) {
+    row_start <- trowd_pos[ti]
+
+    # First \row after this \trowd closes the row
+    ri <- fint(row_start, row_pos) + 1L
+    if (ri > length(row_pos)) next
+    row_close <- row_pos[ri] + 3L  # last char of "\row"
 
     # --- is_header: \trhdr present? ---
-    is_hdr <- grepl("\\\\trhdr(?![a-zA-Z])", row_text, perl = TRUE)
+    is_hdr <- any_within(trhdr_pos, row_start, row_close)
 
     # --- cell boundary positions (\cellxN) ---
-    cellx_matches <- gregexpr("\\\\cellx([0-9]+)", row_text, perl = TRUE)
-    cellx_vals <- as.integer(regmatches(row_text, cellx_matches)[[1]] |>
-                               gsub("\\\\cellx", "", x = _))
-
-    # --- merge flags per cell position ---
-    # \clmgf = first of merge, \clmrg = continuation
-    # These appear in the row definition before \cellxN values
-    # We pair them by order with cellx_vals
-    clmgf_pos <- gregexpr("\\\\clmgf(?![a-zA-Z])", row_text, perl = TRUE)[[1]]
-    clmrg_pos <- gregexpr("\\\\clmrg(?![a-zA-Z])",  row_text, perl = TRUE)[[1]]
-    has_clmgf <- !identical(clmgf_pos, -1L)
-    has_clmrg <- !identical(clmrg_pos, -1L)
-
-    # Build cell definition list (one entry per \cellx)
-    n_cells_def <- length(cellx_vals)
-    cell_defs <- vector("list", n_cells_def)
-    for (ci in seq_len(n_cells_def)) {
-      w <- if (ci == 1L) cellx_vals[1] else cellx_vals[ci] - cellx_vals[ci - 1L]
-      cell_defs[[ci]] <- list(width_twips = w, is_merge_first = FALSE, is_merge_cont = FALSE)
+    di1 <- fint(row_start - 1L, cellx_pos) + 1L
+    di2 <- fint(row_close, cellx_pos)
+    if (di1 <= di2) {
+      cx_pos_row <- cellx_pos[di1:di2]
+      cx_vals    <- cellx_vals[di1:di2]
+    } else {
+      cx_pos_row <- numeric()
+      cx_vals    <- integer()
     }
 
-    # Tag merge cells: find \clmgf / \clmrg occurrences and their nearest following \cellx
-    # Simpler approach: find all cell-def blocks between \trowd and first \cell
-    # Each block starts at a \clmgf or \clmrg before its \cellxN
-    if (has_clmgf || has_clmrg) {
-      # Find positions of all \cellx in the row_text
-      cx_pos <- gregexpr("\\\\cellx[0-9]+", row_text, perl = TRUE)[[1]]
-      if (!identical(cx_pos, -1L)) {
-        for (ci in seq_along(cx_pos)) {
-          # What's between previous cellx (or \trowd) and this cellx?
-          prev <- if (ci == 1L) 1L else cx_pos[ci - 1L]
-          seg  <- substr(row_text, prev, cx_pos[ci])
-          cell_defs[[ci]]$is_merge_first <- grepl("\\\\clmgf(?![a-zA-Z])", seg, perl = TRUE)
-          cell_defs[[ci]]$is_merge_cont  <- grepl("\\\\clmrg(?![a-zA-Z])",  seg, perl = TRUE)
-        }
-      }
+    # Cell widths from successive \cellx differences
+    n_cells_def <- length(cx_vals)
+    widths <- if (n_cells_def > 0L) c(cx_vals[1L], diff(cx_vals)) else integer()
+
+    # --- merge flags per cell position ---
+    # \clmgf = first of merge, \clmrg = continuation; each belongs to the
+    # next \cellx that follows it in the row definition
+    merge_first <- logical(n_cells_def)
+    merge_cont  <- logical(n_cells_def)
+    for (p in pos_within(clmgf_pos, row_start, row_close)) {
+      k <- fint(p, cx_pos_row) + 1L
+      if (k <= n_cells_def) merge_first[k] <- TRUE
+    }
+    for (p in pos_within(clmrg_pos, row_start, row_close)) {
+      k <- fint(p, cx_pos_row) + 1L
+      if (k <= n_cells_def) merge_cont[k] <- TRUE
     }
 
     # --- extract cell contents (\cell boundaries) ---
-    # Split on \cell to get cell content chunks
-    cell_chunks <- strsplit(row_text, "\\\\cell(?![a-zA-Z])", perl = TRUE)[[1]]
-    # Last chunk is after the final \cell (contains \row etc.), discard it
-    if (length(cell_chunks) > 1L) cell_chunks <- cell_chunks[-length(cell_chunks)]
+    # Chunk i runs from just after the previous \cell (or the row start)
+    # up to just before \cell i; text after the final \cell is discarded.
+    # A row with no \cell yields one chunk spanning the whole row.
+    cp <- pos_within(cell_pos, row_start, row_close)
+    if (length(cp) > 0L) {
+      chunk_starts <- c(row_start, cp[-length(cp)] + 5L)
+      chunk_ends   <- cp - 1L
+    } else {
+      chunk_starts <- row_start
+      chunk_ends   <- row_close
+    }
+    cell_chunks <- substring(section_text, chunk_starts, chunk_ends)
 
     n_cells_content <- length(cell_chunks)
 
+    # Merge flags per content cell (FALSE beyond the defined cells)
+    flag_first <- logical(n_cells_content)
+    flag_cont  <- logical(n_cells_content)
+    nd <- min(n_cells_content, n_cells_def)
+    if (nd > 0L) {
+      flag_first[seq_len(nd)] <- merge_first[seq_len(nd)]
+      flag_cont[seq_len(nd)]  <- merge_cont[seq_len(nd)]
+    }
+
     # --- bold fallback for header detection ---
     if (!is_hdr && n_cells_content > 0L) {
-      non_empty <- cell_chunks[nchar(trimws(cell_chunks)) > 0L]
+      # has any non-whitespace character (= nchar(trimws(x)) > 0, but one
+      # vectorised regex call instead of trimws's two sub() calls per row)
+      non_empty <- which(grepl("[^ \t\r\n]", cell_chunks, perl = TRUE))
       if (length(non_empty) > 0L) {
-        all_bold <- all(sapply(non_empty, function(ch) {
-          # Has \b (bold on) and no \b0 (bold off) after it
-          grepl("\\\\b(?![a-zA-Z0-9])", ch, perl = TRUE) &&
-            !grepl("\\\\b0(?![a-zA-Z])", ch, perl = TRUE)
-        }))
+        all_bold <- TRUE
+        for (ci in non_empty) {
+          # Has \b (bold on) and no \b0 (bold off)
+          if (!any_within(bold_on_pos, chunk_starts[ci], chunk_ends[ci]) ||
+              any_within(bold_off_pos, chunk_starts[ci], chunk_ends[ci])) {
+            all_bold <- FALSE
+            break
+          }
+        }
         if (all_bold) is_hdr <- TRUE
       }
     }
@@ -305,56 +370,50 @@ parse_rtf_table <- function(section_text) {
     # --- clean cell text ---
     cells <- vector("list", n_cells_content)
     for (ci in seq_len(n_cells_content)) {
-      raw_cell <- cell_chunks[ci]
+      cs <- chunk_starts[ci]
+      ce <- chunk_ends[ci]
 
-      # Extract alignment from RTF control words before stripping
-      cell_align <- if (grepl("\\\\ql(?![a-zA-Z])", raw_cell, perl = TRUE)) {
+      # Alignment from RTF control words within the cell chunk
+      cell_align <- if (any_within(ql_pos, cs, ce)) {
         "left"
-      } else if (grepl("\\\\qr(?![a-zA-Z])", raw_cell, perl = TRUE)) {
+      } else if (any_within(qr_pos, cs, ce)) {
         "right"
-      } else if (grepl("\\\\qc(?![a-zA-Z])", raw_cell, perl = TRUE)) {
+      } else if (any_within(qc_pos, cs, ce)) {
         "center"
       } else {
         NA_character_
       }
 
-      # Strip RTF control words and groups, leaving plain text
-      cell_text <- rtf_cell_to_text(raw_cell)
-
-      w_twips <- if (ci <= length(cell_defs)) cell_defs[[ci]]$width_twips else 0L
-      is_cont  <- ci <= length(cell_defs) && isTRUE(cell_defs[[ci]]$is_merge_cont)
-      is_first <- ci <= length(cell_defs) && isTRUE(cell_defs[[ci]]$is_merge_first)
-
       cells[[ci]] <- list(
-        text           = cell_text,
-        width_twips    = w_twips,
+        text           = rtf_cell_to_text(cell_chunks[ci]),
+        width_twips    = if (ci <= n_cells_def) widths[ci] else 0L,
         align          = cell_align,
-        is_merge_first = is_first,
-        is_merge_cont  = is_cont
+        is_merge_first = flag_first[ci],
+        is_merge_cont  = flag_cont[ci]
       )
     }
 
-    # --- resolve merged cells: repeat first-cell text into continuations ---
-    if (n_cells_content > 1L) {
-      last_first_text <- ""
-      for (ci in seq_len(n_cells_content)) {
-        if (isTRUE(cells[[ci]]$is_merge_first)) {
-          last_first_text <- cells[[ci]]$text
-        } else if (isTRUE(cells[[ci]]$is_merge_cont)) {
-          cells[[ci]]$text <- last_first_text
+    if (any(flag_first) || any(flag_cont)) {
+      # --- resolve merged cells: repeat first-cell text into continuations ---
+      if (n_cells_content > 1L) {
+        last_first_text <- ""
+        for (ci in seq_len(n_cells_content)) {
+          if (flag_first[ci]) {
+            last_first_text <- cells[[ci]]$text
+          } else if (flag_cont[ci]) {
+            cells[[ci]]$text <- last_first_text
+          }
         }
       }
-    }
 
-    # --- compute colspan for each cell ---
-    # A merged group: is_merge_first followed by N is_merge_cont cells -> colspan = N+1
-    if (n_cells_content > 0L) {
+      # --- compute colspan for each cell ---
+      # A merged group: is_merge_first followed by N is_merge_cont cells -> colspan = N+1
       ci <- 1L
       while (ci <= n_cells_content) {
-        if (isTRUE(cells[[ci]]$is_merge_first)) {
+        if (flag_first[ci]) {
           span <- 1L
           j <- ci + 1L
-          while (j <= n_cells_content && isTRUE(cells[[j]]$is_merge_cont)) {
+          while (j <= n_cells_content && flag_cont[j]) {
             span <- span + 1L
             j <- j + 1L
           }
@@ -369,12 +428,16 @@ parse_rtf_table <- function(section_text) {
           ci <- ci + 1L
         }
       }
+    } else {
+      # No merges in this row: every cell spans one column
+      for (ci in seq_len(n_cells_content)) cells[[ci]]$colspan <- 1L
     }
 
-    rows <- c(rows, list(list(is_header = is_hdr, cells = cells)))
+    nr <- nr + 1L
+    rows[[nr]] <- list(is_header = is_hdr, cells = cells)
   }
 
-  rows
+  rows[seq_len(nr)]
 }
 
 # Strip RTF markup from a cell's raw text, returning clean plain text
